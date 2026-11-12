@@ -1,0 +1,90 @@
+#include <windows.h>
+#include "resource.h"
+
+#pragma code_page(65001)
+
+IDI_PLUGIN_ICON ICON "IsoWriter.ico"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 1,0,0,0
+ PRODUCTVERSION 1,0,0,0
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_DLL
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "FileDescription", "ISO USB Writer (Raw Write ISO/IMG to USB drives)"
+            VALUE "FileVersion", "1.0.0.0"
+            VALUE "ProductName", "IsoWriter"
+            VALUE "ProductVersion", "1.0.0.0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 chuikoff"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+
+IDD_WRITE_DIALOG DIALOGEX 0, 0, 340, 286
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Параметры записи образа на USB (IsoWriter)"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Исходный образ", IDC_STATIC, 10, 6, 320, 50
+    LTEXT           "Файл:", IDC_STATIC, 18, 18, 30, 8
+    LTEXT           "", IDC_STATIC_IMAGE_NAME, 52, 18, 270, 8, SS_PATHELLIPSIS
+    LTEXT           "Размер:", IDC_STATIC, 18, 30, 30, 8
+    LTEXT           "", IDC_STATIC_IMAGE_SIZE, 52, 30, 90, 8
+    LTEXT           "Формат:", IDC_STATIC, 18, 42, 30, 8
+    LTEXT           "", IDC_STATIC_BOOT_TYPE, 52, 42, 270, 8
+
+    GROUPBOX        "Целевой USB-накопитель", IDC_STATIC, 10, 58, 320, 50
+    LTEXT           "Устройство:", IDC_STATIC, 18, 70, 45, 8
+    LTEXT           "", IDC_STATIC_TARGET_NAME, 68, 70, 254, 8
+    LTEXT           "Емкость:", IDC_STATIC, 18, 82, 45, 8
+    LTEXT           "", IDC_STATIC_TARGET_CAPACITY, 68, 82, 90, 8
+    LTEXT           "Разделы:", IDC_STATIC, 18, 94, 45, 8
+    LTEXT           "", IDC_STATIC_TARGET_LETTERS, 68, 94, 254, 8
+
+    GROUPBOX        "Режим загрузки", IDC_STATIC, 10, 110, 320, 96
+    CONTROL         "Как в образе (DD)", IDC_RADIO_BOOT_IMAGE, "Button", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 18, 122, 140, 10
+    CONTROL         "UEFI", IDC_RADIO_BOOT_UEFI, "Button", BS_AUTORADIOBUTTON | WS_TABSTOP, 18, 136, 70, 10
+    CONTROL         "Legacy", IDC_RADIO_BOOT_LEGACY, "Button", BS_AUTORADIOBUTTON | WS_TABSTOP, 100, 136, 70, 10
+    CONTROL         "UEFI и Legacy", IDC_RADIO_BOOT_BOTH, "Button", BS_AUTORADIOBUTTON | WS_TABSTOP, 180, 136, 130, 10
+    LTEXT           "", IDC_STATIC_BOOT_DESC, 18, 152, 304, 48
+
+    CONTROL         "ВНИМАНИЕ: Все разделы и данные на флешке будут уничтожены!",
+                    IDC_STATIC_WARNING, "Static", SS_LEFT | WS_GROUP, 12, 212, 316, 12
+
+    CONTROL         "Проверить запись побайтно", IDC_CHECK_VERIFY,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 228, 300, 10
+    CONTROL         "Я подтверждаю удаление всех данных на выбранном USB диске", IDC_CHECK_CONFIRM,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 242, 300, 10
+
+    PUSHBUTTON      "По умолчанию", IDC_BTN_SAVE_DEFAULTS, 10, 262, 70, 16
+    DEFPUSHBUTTON   "Записать", IDOK, 210, 262, 55, 16, WS_DISABLED
+    PUSHBUTTON      "Отмена", IDCANCEL, 272, 262, 55, 16
+END
+
+IDD_SETTINGS_DIALOG DIALOGEX 0, 0, 280, 122
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Настройки IsoWriter по умолчанию"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Режим загрузки по умолчанию:", IDC_STATIC, 14, 12, 180, 8
+    COMBOBOX        IDC_COMBO_DEFAULT_BOOT, 14, 24, 250, 70, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+
+    CONTROL         "Всегда включать проверку после записи", IDC_CHECK_DEFAULT_VERIFY,
+                    "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 14, 50, 250, 10
+
+    LTEXT           "ISO без MBR: файлы на FAT32/NTFS. Образ с MBR: UEFI и Legacy меняют только флаги.", IDC_STATIC, 14, 68, 250, 20
+
+    DEFPUSHBUTTON   "Сохранить", IDOK, 154, 96, 54, 15
+    PUSHBUTTON      "Отмена", IDCANCEL, 212, 96, 52, 15
+END

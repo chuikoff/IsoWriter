@@ -1,0 +1,7 @@
+[plugininstall]
+description=ISO USB Writer (Raw Write ISO/IMG to USB drives)
+type=wfx
+file=IsoWriter.wfx
+file64=IsoWriter.wfx64
+defaultdir=IsoWriter
+icon=IsoWriter.ico

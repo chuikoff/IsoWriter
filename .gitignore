@@ -1,0 +1,9 @@
+build32/
+build64/
+dist/
+IsoWriter.zip
+test_write.cpp
+test_write.exe
+test_write.obj
+*.png
+.vs/
