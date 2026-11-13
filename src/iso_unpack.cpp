@@ -33,6 +33,7 @@ struct CopyPlan {
 struct BigFile {
     std::wstring full;
     std::wstring name;
+    uint64_t size = 0;
     bool split = false;
 };
 
@@ -188,7 +189,8 @@ std::wstring LastLines(const std::wstring& text) {
 
 RunKind RunProcess(const std::wstring& exe, const std::wstring& args, const std::wstring& workDir,
                    const ProgressFn& progress, const std::function<int()>& percent,
-                   const std::wstring& status, std::wstring& output, DWORD& exitCode) {
+                   const std::wstring& status, std::wstring& output, DWORD& exitCode,
+                   const std::function<std::wstring()>& statusFn = nullptr) {
     struct Handles {
         HANDLE job = NULL;
         HANDLE process = NULL;
@@ -288,7 +290,8 @@ RunKind RunProcess(const std::wstring& exe, const std::wstring& args, const std:
             return RunKind::Done;
         }
         int pct = percent ? percent() : 0;
-        if (progress && !progress(pct, status)) {
+        std::wstring curStatus = statusFn ? statusFn() : status;
+        if (progress && !progress(pct, curStatus)) {
             TerminateProcess(handles.process, 1);
             WaitForSingleObject(handles.process, 3000);
             output = OemToWide(bytes);
@@ -507,6 +510,7 @@ bool WalkFiles(const std::wstring& dir, int depth, bool& anyBig, bool& nonSplit,
         BigFile hit;
         hit.full = full;
         hit.name = fd.cFileName;
+        hit.size = size;
         hit.split = SplitName(fd.cFileName);
         if (!hit.split) nonSplit = true;
         hits.push_back(hit);
@@ -669,6 +673,21 @@ uint64_t FileSizeOf(const std::wstring& path) {
     return ((uint64_t)data.nFileSizeHigh << 32) | data.nFileSizeLow;
 }
 
+uint64_t SumPatternSizes(const std::wstring& dir, const std::wstring& pattern) {
+    std::wstring search = dir + (dir.empty() || dir.back() == L'\\' ? L"" : L"\\") + pattern;
+    WIN32_FIND_DATAW fd = {};
+    HANDLE h = FindFirstFileW(search.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    uint64_t total = 0;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            total += ((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return total;
+}
+
 } // namespace
 
 WriteResult RawWriter::UnpackIso(const WriteParams& params, ProgressFn progressCallback, std::wstring& outErrorMessage) {
@@ -821,8 +840,11 @@ WriteResult RawWriter::UnpackIso(const WriteParams& params, ProgressFn progressC
         if (pct > 85) pct = 85;
         return pct;
     };
+    auto copyStatus = [&]() -> std::wstring {
+        return L"Копирование файлов (" + std::to_wstring(copyPercent()) + L"%)...";
+    };
     ran = RunProcess(SystemExe(L"robocopy.exe"), copyArgs, L"", progressCallback, copyPercent,
-                     L"Копирование файлов...", copyOut, copyExit);
+                     L"Копирование файлов...", copyOut, copyExit, copyStatus);
     Log(L"robocopy exit=" + std::to_wstring(copyExit) + L"\r\n" + copyOut);
     if (ran == RunKind::Cancelled) {
         return Fail(outErrorMessage, L"Копирование отменено. Запишите образ ещё раз.", WriteResult::Cancelled);
@@ -845,8 +867,27 @@ WriteResult RawWriter::UnpackIso(const WriteParams& params, ProgressFn progressC
                                 L" /SWMFile:" + Quote(swm) + L" /FileSize:4000";
             std::wstring splitOut;
             DWORD splitExit = 1;
-            ran = RunProcess(SystemExe(L"dism.exe"), args, L"", progressCallback, fixed(92),
-                             L"Разрезание " + hit.name + L"...", splitOut, splitExit);
+            size_t slash = swm.find_last_of(L"\\/");
+            std::wstring swmDir = (slash != std::wstring::npos) ? swm.substr(0, slash) : (std::wstring(1, usbLetter) + L":");
+            std::wstring base = hit.name;
+            size_t dot = base.find_last_of(L'.');
+            if (dot != std::wstring::npos) base = base.substr(0, dot);
+
+            auto splitPercent = [&]() -> int {
+                uint64_t written = SumPatternSizes(swmDir, base + L"*.swm");
+                if (hit.size == 0) return 90;
+                int p = (int)((written * 100) / hit.size);
+                if (p > 99) p = 99;
+                return 85 + (p * 11) / 100; // 85% to 96%
+            };
+            auto splitStatus = [&]() -> std::wstring {
+                uint64_t written = SumPatternSizes(swmDir, base + L"*.swm");
+                int p = hit.size > 0 ? (int)((written * 100) / hit.size) : 0;
+                if (p > 99) p = 99;
+                return L"Разрезание " + hit.name + L" (" + std::to_wstring(p) + L"%)...";
+            };
+            ran = RunProcess(SystemExe(L"dism.exe"), args, L"", progressCallback, splitPercent,
+                             L"Разрезание " + hit.name + L"...", splitOut, splitExit, splitStatus);
             Log(L"dism " + hit.name + L" exit=" + std::to_wstring(splitExit) + L"\r\n" + splitOut);
             if (ran == RunKind::Cancelled) {
                 return Fail(outErrorMessage, L"Запись отменена. Файлы уже частично скопированы.", WriteResult::Cancelled);
