@@ -10,7 +10,6 @@ INT_PTR CALLBACK SettingsDialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM 
     case WM_INITDIALOG: {
         PluginSettings s = SettingsManager::Load();
 
-        // Verify checkbox
         CheckDlgButton(hDlg, IDC_CHECK_DEFAULT_VERIFY, s.verifyAfterWrite ? BST_CHECKED : BST_UNCHECKED);
 
         HWND hBoot = GetDlgItem(hDlg, IDC_COMBO_DEFAULT_BOOT);
@@ -18,6 +17,7 @@ INT_PTR CALLBACK SettingsDialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM 
         SendMessageW(hBoot, CB_ADDSTRING, 0, (LPARAM)L"UEFI");
         SendMessageW(hBoot, CB_ADDSTRING, 0, (LPARAM)L"Legacy");
         SendMessageW(hBoot, CB_ADDSTRING, 0, (LPARAM)L"UEFI и Legacy");
+
         int bootSel = (int)s.bootMode;
         if (bootSel < 0 || bootSel > 3) bootSel = 0;
         SendMessageW(hBoot, CB_SETCURSEL, bootSel, 0);
@@ -30,7 +30,6 @@ INT_PTR CALLBACK SettingsDialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM 
         if (wmId == IDOK) {
             PluginSettings s = SettingsManager::Load();
 
-            // Verify
             s.verifyAfterWrite = (IsDlgButtonChecked(hDlg, IDC_CHECK_DEFAULT_VERIFY) == BST_CHECKED);
             int bootSel = (int)SendMessageW(GetDlgItem(hDlg, IDC_COMBO_DEFAULT_BOOT), CB_GETCURSEL, 0, 0);
             if (bootSel < 0 || bootSel > 3) bootSel = 0;
@@ -69,9 +68,15 @@ PluginSettings SettingsManager::Load() {
     int verify = GetPrivateProfileIntW(L"Settings", L"DefaultVerify", 1, ini.c_str());
     s.verifyAfterWrite = (verify != 0);
 
-    int boot = GetPrivateProfileIntW(L"Settings", L"BootMode", 0, ini.c_str());
+    int boot = GetPrivateProfileIntW(L"Settings", L"DefaultBootMode", -1, ini.c_str());
+    if (boot < 0) {
+        boot = GetPrivateProfileIntW(L"Settings", L"BootMode", 0, ini.c_str());
+    }
     if (boot < 0 || boot > 3) boot = 0;
     s.bootMode = (BootWriteMode)boot;
+
+    s.bufferSizeKb = GetPrivateProfileIntW(L"Settings", L"BufferSizeKb", 1024, ini.c_str());
+    if (s.bufferSizeKb < 64 || s.bufferSizeKb > 16384) s.bufferSizeKb = 1024;
 
     return s;
 }
@@ -81,8 +86,12 @@ bool SettingsManager::Save(const PluginSettings& settings) {
 
     WritePrivateProfileStringW(L"Settings", L"DefaultVerify",
                                settings.verifyAfterWrite ? L"1" : L"0", ini.c_str());
+    WritePrivateProfileStringW(L"Settings", L"DefaultBootMode",
+                               std::to_wstring((int)settings.bootMode).c_str(), ini.c_str());
     WritePrivateProfileStringW(L"Settings", L"BootMode",
                                std::to_wstring((int)settings.bootMode).c_str(), ini.c_str());
+    WritePrivateProfileStringW(L"Settings", L"BufferSizeKb",
+                               std::to_wstring(settings.bufferSizeKb).c_str(), ini.c_str());
 
     return true;
 }

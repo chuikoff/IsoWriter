@@ -2,7 +2,7 @@
 #include <windows.h>
 #include <string>
 
-enum class BootWriteMode : int {
+enum class BootWriteMode {
     AsImage = 0,
     Uefi = 1,
     Legacy = 2,
@@ -13,15 +13,15 @@ inline const wchar_t* BootWriteModeName(BootWriteMode mode) {
     switch (mode) {
     case BootWriteMode::Uefi: return L"UEFI";
     case BootWriteMode::Legacy: return L"Legacy";
-    case BootWriteMode::Both: return L"UEFI + Legacy";
-    default: return L"как в образе";
+    case BootWriteMode::Both: return L"UEFI и Legacy";
+    default: return L"Как в образе (DD)";
     }
 }
 
 struct PluginSettings {
     bool verifyAfterWrite = true;
-    bool autoConfirm = false;
     BootWriteMode bootMode = BootWriteMode::AsImage;
+    int bufferSizeKb = 1024;
 };
 
 class SettingsManager {

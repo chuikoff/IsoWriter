@@ -29,38 +29,24 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 
 namespace {
 
-WriteResult RunWrite(const WriteParams& params, const ProgressFn& progress, std::wstring& error) {
-    if (params.unpackPlainIso) return RawWriter::UnpackIso(params, progress, error);
-    return RawWriter::BurnImage(params, progress, error);
-}
-
 std::wstring ResultText(const WriteParams& params, WriteResult result, const std::wstring& error) {
     if (result == WriteResult::Success) {
-        if (params.unpackPlainIso) {
-            BootWriteMode shown = params.bootMode == BootWriteMode::AsImage ? BootWriteMode::Both : params.bootMode;
-            std::wstring text = L"Файлы образа скопированы на накопитель " + params.targetDrive.tcFolderName +
-                                L".\nWindows должен видеть раздел, а не RAW.";
-            text += L"\nРежим загрузки: ";
-            text += BootWriteModeName(shown);
-            text += L".";
-            if (params.verifyAfterWrite) text += L"\nФайлы загрузки на месте.";
-            if (!error.empty()) text += L"\n" + error;
-            return text;
+        std::wstring text = L"Образ успешно записан на накопитель " + params.targetDrive.tcFolderName + L".";
+        if (params.verifyAfterWrite) {
+            text += L"\nВерификация данных успешно пройдена.";
         }
-        std::wstring text = L"Образ записан на накопитель " + params.targetDrive.tcFolderName + L".";
-        if (params.verifyAfterWrite) text += L"\nПроверка совпала с файлом образа.";
         if (params.bootMode != BootWriteMode::AsImage) {
-            text += L"\nФлаги загрузки: ";
+            text += L"\nПрименен режим загрузки: ";
             text += BootWriteModeName(params.bootMode);
             text += L".";
         }
         return text;
     }
     if (result == WriteResult::Cancelled) {
-        return error.empty() ? L"Запись отменена." : error;
+        return error.empty() ? L"Запись отменена пользователем." : error;
     }
-    std::wstring text = error.empty() ? L"Ошибка записи." : error;
-    text += L"\n\nЛог: " + RawWriter::LogFilePath();
+    std::wstring text = error.empty() ? L"Произошла ошибка при записи." : error;
+    text += L"\n\nПодробный лог: " + RawWriter::LogFilePath();
     return text;
 }
 
@@ -78,7 +64,6 @@ struct SearchContext {
     size_t currentIndex = 0;
 };
 
-// Check if file has an image extension
 bool IsImageExtension(const std::wstring& path) {
     size_t dot = path.find_last_of(L'.');
     if (dot == std::wstring::npos) return false;
@@ -87,7 +72,6 @@ bool IsImageExtension(const std::wstring& path) {
     return (ext == L".iso" || ext == L".img" || ext == L".raw" || ext == L".bin");
 }
 
-// Extract physical drive index from remote path e.g. "\[USB 2] Kingston..."
 int ExtractDriveIndexFromPath(const std::wstring& remotePath) {
     size_t pos = remotePath.find(L"[USB ");
     if (pos == std::wstring::npos) {
@@ -126,7 +110,6 @@ __declspec(dllexport) int __stdcall FsInitW(int PluginNr,
     return 0;
 }
 
-// BG_UPLOAD: F5's "В фоне" runs FsPutFileW on TC's background thread and shows its own transfer list.
 __declspec(dllexport) int __stdcall FsGetBackgroundFlags(void) {
     return BG_UPLOAD;
 }
@@ -150,53 +133,42 @@ __declspec(dllexport) void __stdcall FsGetDefRootName(char* DefRootName, int max
 __declspec(dllexport) HANDLE __stdcall FsFindFirstW(WCHAR* Path, WIN32_FIND_DATAW* FindData) {
     if (!Path || !FindData) return INVALID_HANDLE_VALUE;
 
-    std::wstring p = Path;
-    while (!p.empty() && (p.back() == L'\\' || p.back() == L'/')) {
-        p.pop_back();
+    std::wstring strPath = Path;
+    while (!strPath.empty() && (strPath.back() == L'\\' || strPath.back() == L'/')) {
+        strPath.pop_back();
     }
 
-    auto ctx = std::make_unique<SearchContext>();
-    ctx->path = p;
+    SearchContext* ctx = new SearchContext();
+    ctx->path = strPath;
 
-    if (p.empty() || p == L"\\" || p == L"/") {
-        // Root directory: enumerate USB drives as folders
+    if (strPath.empty() || strPath == L"\\") {
         auto drives = DriveEnumerator::EnumerateUsbDrives();
-
-        for (const auto& d : drives) {
+        for (const auto& drive : drives) {
             WIN32_FIND_DATAW fd = {0};
             fd.dwFileAttributes = FILE_ATTRIBUTE_DIRECTORY;
-            wcsncpy_s(fd.cFileName, MAX_PATH, d.tcFolderName.c_str(), _TRUNCATE);
+            wcsncpy_s(fd.cFileName, drive.tcFolderName.c_str(), _TRUNCATE);
             ctx->entries.push_back(fd);
         }
 
-        // Add special settings item
-        WIN32_FIND_DATAW fdSet = {0};
-        fdSet.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
-        wcsncpy_s(fdSet.cFileName, MAX_PATH, L"[Настройки по умолчанию (Enter для открытия)]", _TRUNCATE);
-        ctx->entries.push_back(fdSet);
-
-        // If no drives found, show a helpful dummy item
-        if (drives.empty()) {
-            WIN32_FIND_DATAW fd = {0};
-            fd.dwFileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
-            wcsncpy_s(fd.cFileName, MAX_PATH, L"[USB накопители не обнаружены — подключите флешку и нажмите Ctrl+R].txt", _TRUNCATE);
-            ctx->entries.push_back(fd);
-        }
+        WIN32_FIND_DATAW fdConfig = {0};
+        fdConfig.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+        wcsncpy_s(fdConfig.cFileName, L"[Настройки плагина (двойной клик)]", _TRUNCATE);
+        ctx->entries.push_back(fdConfig);
     } else {
-        // Inside a drive directory: show helpful drop target hint
         WIN32_FIND_DATAW fd = {0};
-        fd.dwFileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
-        wcsncpy_s(fd.cFileName, MAX_PATH, L"[Скопируйте сюда .ISO файл для записи на этот USB-диск].txt", _TRUNCATE);
+        fd.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
+        wcsncpy_s(fd.cFileName, L"[Скопируйте сюда ISO файл для записи на этот USB накопитель].txt", _TRUNCATE);
         ctx->entries.push_back(fd);
     }
 
     if (ctx->entries.empty()) {
+        delete ctx;
         return INVALID_HANDLE_VALUE;
     }
 
     *FindData = ctx->entries[0];
     ctx->currentIndex = 1;
-    return (HANDLE)ctx.release();
+    return (HANDLE)ctx;
 }
 
 __declspec(dllexport) BOOL __stdcall FsFindNextW(HANDLE Hdl, WIN32_FIND_DATAW* FindData) {
@@ -328,7 +300,6 @@ __declspec(dllexport) int __stdcall FsPutFileW(WCHAR* LocalName, WCHAR* RemoteNa
     params.targetDrive = targetDrive;
     params.verifyAfterWrite = dlgResult.verify;
     params.bootMode = dlgResult.bootMode;
-    params.unpackPlainIso = isoInfo.hasIso9660 && !isoInfo.hasMbr && !isoInfo.hasGpt;
 
     auto progressCallback = [&](int percentDone, const std::wstring& statusText) -> bool {
         if (g_pProgressProcW) {
@@ -343,10 +314,7 @@ __declspec(dllexport) int __stdcall FsPutFileW(WCHAR* LocalName, WCHAR* RemoteNa
     };
 
     std::wstring errorMsg;
-    WriteResult result = RunWrite(params, progressCallback, errorMsg);
-    if (result != WriteResult::Success && !errorMsg.empty()) {
-        errorMsg += L"\n\nЛог: " + RawWriter::LogFilePath();
-    }
+    WriteResult result = RawWriter::BurnImage(params, progressCallback, errorMsg);
 
     if (result == WriteResult::Success) {
         if (!inBackground) {
@@ -360,7 +328,8 @@ __declspec(dllexport) int __stdcall FsPutFileW(WCHAR* LocalName, WCHAR* RemoteNa
         }
         return FS_FILE_USERABORT;
     } else {
-        MessageBoxW(hParent, errorMsg.c_str(), L"Ошибка записи (IsoWriter)", MB_OK | MB_ICONERROR);
+        std::wstring errDisplay = ResultText(params, result, errorMsg);
+        MessageBoxW(hParent, errDisplay.c_str(), L"Ошибка записи (IsoWriter)", MB_OK | MB_ICONERROR);
         return FS_FILE_WRITEERROR;
     }
 }

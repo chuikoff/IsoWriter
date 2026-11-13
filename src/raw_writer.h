@@ -23,8 +23,6 @@ struct WriteParams {
     UsbDriveInfo targetDrive;
     bool verifyAfterWrite = true;
     BootWriteMode bootMode = BootWriteMode::AsImage;
-    // Plain ISO9660 without a partition table. Byte copy of that image is what Windows calls RAW.
-    bool unpackPlainIso = false;
 };
 
 // Callback: returns false if user requested cancellation
@@ -35,5 +33,4 @@ public:
     static std::wstring LogFilePath();
     static void Log(const std::wstring& msg);
     static WriteResult BurnImage(const WriteParams& params, ProgressFn progressCallback, std::wstring& outErrorMessage);
-    static WriteResult UnpackIso(const WriteParams& params, ProgressFn progressCallback, std::wstring& outErrorMessage);
 };

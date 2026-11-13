@@ -10,25 +10,13 @@ struct DialogContext {
     WriteDialogResult result;
 };
 
-bool PlainIso(const IsoFileInfo& iso) {
-    return iso.hasIso9660 && !iso.hasMbr && !iso.hasGpt;
-}
-
-bool ModeAllowed(const IsoFileInfo& iso, BootWriteMode mode) {
-    if (PlainIso(iso)) return true;
-    bool uefi = iso.hasEfiPartition || iso.hasGpt;
-    bool legacy = iso.hasLegacyPartition;
-    if (mode == BootWriteMode::Uefi) return uefi;
-    if (mode == BootWriteMode::Legacy) return legacy;
-    if (mode == BootWriteMode::Both) return uefi && legacy;
-    return true;
-}
-
 int RadioForMode(BootWriteMode mode) {
-    if (mode == BootWriteMode::Uefi) return IDC_RADIO_BOOT_UEFI;
-    if (mode == BootWriteMode::Legacy) return IDC_RADIO_BOOT_LEGACY;
-    if (mode == BootWriteMode::Both) return IDC_RADIO_BOOT_BOTH;
-    return IDC_RADIO_BOOT_IMAGE;
+    switch (mode) {
+    case BootWriteMode::Uefi: return IDC_RADIO_BOOT_UEFI;
+    case BootWriteMode::Legacy: return IDC_RADIO_BOOT_LEGACY;
+    case BootWriteMode::Both: return IDC_RADIO_BOOT_BOTH;
+    default: return IDC_RADIO_BOOT_IMAGE;
+    }
 }
 
 BootWriteMode ModeFromRadio(HWND hDlg) {
@@ -38,27 +26,22 @@ BootWriteMode ModeFromRadio(HWND hDlg) {
     return BootWriteMode::AsImage;
 }
 
-void UpdateBootDesc(HWND hDlg, const IsoFileInfo& iso) {
+void UpdateBootDesc(HWND hDlg) {
     BootWriteMode mode = ModeFromRadio(hDlg);
-    const wchar_t* text = L"Байты образа пишутся как есть. Флаги загрузки не меняются.";
-    if (PlainIso(iso)) {
-        if (mode == BootWriteMode::Uefi) {
-            text = L"В ISO нет таблицы разделов, побайтовая запись даёт RAW. Файлы копируются на FAT32, UEFI берёт \\efi\\boot\\bootx64.efi.";
-        } else if (mode == BootWriteMode::Legacy) {
-            text = L"Файлы копируются на раздел. Если в образе есть файл больше 4 ГБ, раздел будет NTFS, иначе FAT32. BIOS ставит bootsect.exe из образа.";
-        } else if (mode == BootWriteMode::Both) {
-            text = L"Файлы на FAT32, раздел активный, bootsect для BIOS и \\efi\\boot для UEFI. install.wim больше 4 ГБ разрезается. Это не RAW и не побайтовая копия.";
-        } else {
-            text = L"В ISO нет таблицы разделов, побайтовая запись даёт RAW. «Как в образе» копирует файлы на FAT32 и включает UEFI и Legacy сразу. Образ с MBR по-прежнему пишется байт в байт.";
-        }
-    } else if (!iso.hasMbr && !iso.hasGpt) {
-        text = L"В образе нет таблицы разделов. UEFI, Legacy и оба меняют только флаг активного раздела в MBR, поэтому здесь доступна побайтовая запись.";
-    } else if (mode == BootWriteMode::Uefi) {
-        text = L"После записи снимается флаг активной загрузки BIOS. Раздел EFI остаётся. Файлы из ISO отдельно не копируются.";
-    } else if (mode == BootWriteMode::Legacy) {
-        text = L"После записи первый обычный раздел помечается активным (0x80) для BIOS. Файлы из ISO отдельно не копируются.";
-    } else if (mode == BootWriteMode::Both) {
-        text = L"Обычный раздел помечается активным, раздел EFI сохраняется. Оба загрузчика должны уже быть в образе.";
+    const wchar_t* text = L"";
+    switch (mode) {
+    case BootWriteMode::AsImage:
+        text = L"Прямая побайтовая копия (DD). Флаги и структура образа переносятся без изменений.";
+        break;
+    case BootWriteMode::Uefi:
+        text = L"Режим UEFI: образ пишется побайтно, флаг загрузки BIOS (0x80) в MBR сбрасывается.";
+        break;
+    case BootWriteMode::Legacy:
+        text = L"Режим Legacy BIOS: образ пишется побайтно, основной раздел помечается активным (0x80) в MBR.";
+        break;
+    case BootWriteMode::Both:
+        text = L"Режим UEFI и Legacy: образ пишется побайтно, раздел помечается активным, раздел EFI сохраняется.";
+        break;
     }
     SetDlgItemTextW(hDlg, IDC_STATIC_BOOT_DESC, text);
 }
@@ -88,23 +71,19 @@ INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (letters.empty()) letters = L"(нет назначенных букв / RAW)";
         SetDlgItemTextW(hDlg, IDC_STATIC_TARGET_LETTERS, letters.c_str());
 
-        PluginSettings s = SettingsManager::Load();
-        EnableWindow(GetDlgItem(hDlg, IDC_RADIO_BOOT_UEFI), ModeAllowed(*ctx->isoInfo, BootWriteMode::Uefi));
-        EnableWindow(GetDlgItem(hDlg, IDC_RADIO_BOOT_LEGACY), ModeAllowed(*ctx->isoInfo, BootWriteMode::Legacy));
-        EnableWindow(GetDlgItem(hDlg, IDC_RADIO_BOOT_BOTH), ModeAllowed(*ctx->isoInfo, BootWriteMode::Both));
-        BootWriteMode mode = s.bootMode;
-        if (!ModeAllowed(*ctx->isoInfo, mode)) mode = BootWriteMode::AsImage;
-        CheckRadioButton(hDlg, IDC_RADIO_BOOT_IMAGE, IDC_RADIO_BOOT_BOTH, RadioForMode(mode));
-        if (PlainIso(*ctx->isoInfo)) {
-            SetDlgItemTextW(hDlg, IDC_RADIO_BOOT_IMAGE, L"Как в образе (FAT32)");
-            SetDlgItemTextW(hDlg, IDC_CHECK_VERIFY, L"Проверить, что файлы загрузки на месте");
-        }
-        UpdateBootDesc(hDlg, *ctx->isoInfo);
+        // Always enable all boot modes and load default settings
+        EnableWindow(GetDlgItem(hDlg, IDC_RADIO_BOOT_IMAGE), TRUE);
+        EnableWindow(GetDlgItem(hDlg, IDC_RADIO_BOOT_UEFI), TRUE);
+        EnableWindow(GetDlgItem(hDlg, IDC_RADIO_BOOT_LEGACY), TRUE);
+        EnableWindow(GetDlgItem(hDlg, IDC_RADIO_BOOT_BOTH), TRUE);
 
+        PluginSettings s = SettingsManager::Load();
+        CheckRadioButton(hDlg, IDC_RADIO_BOOT_IMAGE, IDC_RADIO_BOOT_BOTH, RadioForMode(s.bootMode));
         CheckDlgButton(hDlg, IDC_CHECK_VERIFY, s.verifyAfterWrite ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(hDlg, IDC_CHECK_CONFIRM, BST_UNCHECKED);
         EnableWindow(GetDlgItem(hDlg, IDOK), FALSE);
 
+        UpdateBootDesc(hDlg);
         return TRUE;
     }
 
@@ -127,8 +106,8 @@ INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
         if ((wmId == IDC_RADIO_BOOT_IMAGE || wmId == IDC_RADIO_BOOT_UEFI ||
              wmId == IDC_RADIO_BOOT_LEGACY || wmId == IDC_RADIO_BOOT_BOTH) &&
-            wmEvent == BN_CLICKED && ctx && ctx->isoInfo) {
-            UpdateBootDesc(hDlg, *ctx->isoInfo);
+            wmEvent == BN_CLICKED) {
+            UpdateBootDesc(hDlg);
             return TRUE;
         }
 

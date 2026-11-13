@@ -83,7 +83,7 @@ BEGIN
     CONTROL         "Всегда включать проверку после записи", IDC_CHECK_DEFAULT_VERIFY,
                     "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 14, 50, 250, 10
 
-    LTEXT           "ISO без MBR: файлы на FAT32/NTFS. Образ с MBR: UEFI и Legacy меняют только флаги.", IDC_STATIC, 14, 68, 250, 20
+    LTEXT           "Образ пишется побайтно (DD). Режимы UEFI/Legacy настраивают флаги загрузки.", IDC_STATIC, 14, 68, 250, 20
 
     DEFPUSHBUTTON   "Сохранить", IDOK, 154, 96, 54, 15
     PUSHBUTTON      "Отмена", IDCANCEL, 212, 96, 52, 15
