@@ -23,6 +23,7 @@ struct WriteParams {
     UsbDriveInfo targetDrive;
     bool verifyAfterWrite = true;
     BootWriteMode bootMode = BootWriteMode::AsImage;
+    std::wstring volumeLabel;
 };
 
 // Callback: returns false if user requested cancellation

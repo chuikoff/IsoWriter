@@ -23,6 +23,7 @@
 #define IDC_RADIO_BOOT_UEFI             1016
 #define IDC_RADIO_BOOT_LEGACY           1017
 #define IDC_RADIO_BOOT_BOTH             1018
+#define IDC_EDIT_VOLUME_LABEL           1019
 
 // Settings dialog
 #define IDD_SETTINGS_DIALOG             102

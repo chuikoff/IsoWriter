@@ -8,6 +8,7 @@ struct WriteDialogResult {
     bool confirmed = false;
     bool verify = true;
     BootWriteMode bootMode = BootWriteMode::AsImage;
+    std::wstring volumeLabel;
 };
 
 class WriteDialog {

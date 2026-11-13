@@ -31,14 +31,18 @@ namespace {
 
 std::wstring ResultText(const WriteParams& params, WriteResult result, const std::wstring& error) {
     if (result == WriteResult::Success) {
-        std::wstring text = L"Образ успешно записан на накопитель " + params.targetDrive.tcFolderName + L".";
+        std::wstring text = L"[OK] Запись на диск завершена успешно!\n\n";
+        text += L"Целевой накопитель:\n  " + params.targetDrive.tcFolderName + L"\n\n";
+        if (!params.volumeLabel.empty()) {
+            text += L"Метка тома:\n  " + params.volumeLabel + L"\n\n";
+        }
         if (params.verifyAfterWrite) {
-            text += L"\nВерификация данных успешно пройдена.";
+            text += L"Побайтовая проверка (верификация):\n  100% СОВПАДЕНИЕ — ошибок не обнаружено!\n\n";
         }
         if (params.bootMode != BootWriteMode::AsImage) {
-            text += L"\nПрименен режим загрузки: ";
+            text += L"Режим загрузки:\n  ";
             text += BootWriteModeName(params.bootMode);
-            text += L".";
+            text += L"\n";
         }
         return text;
     }
@@ -300,6 +304,7 @@ __declspec(dllexport) int __stdcall FsPutFileW(WCHAR* LocalName, WCHAR* RemoteNa
     params.targetDrive = targetDrive;
     params.verifyAfterWrite = dlgResult.verify;
     params.bootMode = dlgResult.bootMode;
+    params.volumeLabel = dlgResult.volumeLabel;
 
     auto progressCallback = [&](int percentDone, const std::wstring& statusText) -> bool {
         if (g_pProgressProcW) {
@@ -316,20 +321,23 @@ __declspec(dllexport) int __stdcall FsPutFileW(WCHAR* LocalName, WCHAR* RemoteNa
     std::wstring errorMsg;
     WriteResult result = RawWriter::BurnImage(params, progressCallback, errorMsg);
 
+    HWND msgParent = hParent ? hParent : (g_hTcWnd ? g_hTcWnd : FindTcMainWindow());
+
     if (result == WriteResult::Success) {
-        if (!inBackground) {
-            std::wstring successMsg = ResultText(params, result, errorMsg);
-            MessageBoxW(hParent, successMsg.c_str(), L"Запись завершена (IsoWriter)", MB_OK | MB_ICONINFORMATION);
-        }
+        std::wstring successMsg = ResultText(params, result, errorMsg);
+        MessageBoxW(msgParent, successMsg.c_str(), L"Запись завершена (IsoWriter)",
+                    MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND | MB_TOPMOST);
         return FS_FILE_OK;
     } else if (result == WriteResult::Cancelled) {
         if (!errorMsg.empty()) {
-            MessageBoxW(hParent, errorMsg.c_str(), L"IsoWriter", MB_OK | MB_ICONWARNING);
+            MessageBoxW(msgParent, errorMsg.c_str(), L"IsoWriter",
+                        MB_OK | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST);
         }
         return FS_FILE_USERABORT;
     } else {
         std::wstring errDisplay = ResultText(params, result, errorMsg);
-        MessageBoxW(hParent, errDisplay.c_str(), L"Ошибка записи (IsoWriter)", MB_OK | MB_ICONERROR);
+        MessageBoxW(msgParent, errDisplay.c_str(), L"Ошибка записи (IsoWriter)",
+                    MB_OK | MB_ICONERROR | MB_SETFOREGROUND | MB_TOPMOST);
         return FS_FILE_WRITEERROR;
     }
 }

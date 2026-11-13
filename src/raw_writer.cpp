@@ -113,6 +113,7 @@ bool VolumeBelongsToDisk(HANDLE hVol, int diskNumber) {
 void LockAndDismountAllDiskVolumes(int diskNumber, std::vector<HANDLE>& outHandles) {
     // 1. Lock drive letters (e.g. \\.\F:)
     DWORD logicalDrives = GetLogicalDrives();
+    std::vector<wchar_t> lockedLetters;
     for (int i = 0; i < 26; ++i) {
         if (logicalDrives & (1 << i)) {
             wchar_t driveLetter = L'A' + i;
@@ -126,6 +127,7 @@ void LockAndDismountAllDiskVolumes(int diskNumber, std::vector<HANDLE>& outHandl
                 if (VolumeBelongsToDisk(hVol, diskNumber)) {
                     if (LockAndDismountHandle(hVol, volPath)) {
                         outHandles.push_back(hVol);
+                        lockedLetters.push_back(driveLetter);
                     } else {
                         CloseHandle(hVol);
                     }
@@ -136,11 +138,28 @@ void LockAndDismountAllDiskVolumes(int diskNumber, std::vector<HANDLE>& outHandl
         }
     }
 
-    // 2. Lock volume GUIDs (FindFirstVolumeW)
+    // 2. Lock volume GUIDs (FindFirstVolumeW) for partitions WITHOUT drive letters
     wchar_t volumeName[MAX_PATH];
     HANDLE hFind = FindFirstVolumeW(volumeName, MAX_PATH);
     if (hFind != INVALID_HANDLE_VALUE) {
         do {
+            // Check if this volume GUID already has a locked drive letter
+            wchar_t pathNames[MAX_PATH] = {0};
+            DWORD pathLen = 0;
+            bool alreadyLocked = false;
+            if (GetVolumePathNamesForVolumeNameW(volumeName, pathNames, MAX_PATH, &pathLen)) {
+                for (wchar_t* p = pathNames; *p; p += wcslen(p) + 1) {
+                    if (p[1] == L':') {
+                        wchar_t letter = towupper(p[0]);
+                        if (std::find(lockedLetters.begin(), lockedLetters.end(), letter) != lockedLetters.end()) {
+                            alreadyLocked = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (alreadyLocked) continue;
+
             std::wstring openPath = volumeName;
             if (!openPath.empty() && openPath.back() == L'\\') openPath.pop_back();
 
@@ -162,19 +181,20 @@ void LockAndDismountAllDiskVolumes(int diskNumber, std::vector<HANDLE>& outHandl
         FindVolumeClose(hFind);
     }
 
-    // 3. Lock low-level NT partitions: \Device\HarddiskN\Partition1..16
-    // This catches raw partitions, Linux filesystems and hybrid ISO layouts lacking volume GUIDs.
-    for (int p = 1; p <= 16; ++p) {
-        std::wstring partPath = L"\\\\?\\GLOBALROOT\\Device\\Harddisk" +
-                                std::to_wstring(diskNumber) + L"\\Partition" + std::to_wstring(p);
-        HANDLE hPart = CreateFileW(partPath.c_str(), GENERIC_READ | GENERIC_WRITE,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                   NULL, OPEN_EXISTING, 0, NULL);
-        if (hPart != INVALID_HANDLE_VALUE) {
-            if (LockAndDismountHandle(hPart, partPath)) {
-                outHandles.push_back(hPart);
-            } else {
-                CloseHandle(hPart);
+    // 3. If no volumes were locked yet (e.g. raw / Linux partitions), try locking partitions directly
+    if (outHandles.empty()) {
+        for (int p = 1; p <= 16; ++p) {
+            std::wstring partPath = L"\\\\?\\GLOBALROOT\\Device\\Harddisk" +
+                                    std::to_wstring(diskNumber) + L"\\Partition" + std::to_wstring(p);
+            HANDLE hPart = CreateFileW(partPath.c_str(), GENERIC_READ | GENERIC_WRITE,
+                                       FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                       NULL, OPEN_EXISTING, 0, NULL);
+            if (hPart != INVALID_HANDLE_VALUE) {
+                if (LockAndDismountHandle(hPart, partPath)) {
+                    outHandles.push_back(hPart);
+                } else {
+                    CloseHandle(hPart);
+                }
             }
         }
     }
@@ -191,7 +211,7 @@ HANDLE OpenPhysicalForWrite(const std::wstring& path) {
                             GENERIC_READ | GENERIC_WRITE,
                             FILE_SHARE_READ | FILE_SHARE_WRITE,
                             NULL, OPEN_EXISTING,
-                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH,
+                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH | FILE_FLAG_NO_BUFFERING,
                             NULL);
         if (hDisk != INVALID_HANDLE_VALUE) {
             RawWriter::Log(L"Opened physical drive " + path + L" successfully");
@@ -208,8 +228,6 @@ HANDLE OpenPhysicalForWrite(const std::wstring& path) {
 void PreparePhysicalDrive(HANDLE hDisk) {
     DWORD bytesRet = 0;
     DeviceIoControl(hDisk, FSCTL_ALLOW_EXTENDED_DASD_IO, NULL, 0, NULL, 0, &bytesRet, NULL);
-    DeviceIoControl(hDisk, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0, &bytesRet, NULL);
-    DeviceIoControl(hDisk, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0, &bytesRet, NULL);
 }
 
 void NotifyDriveLetters(const std::wstring& driveLetters) {
@@ -221,6 +239,37 @@ void NotifyDriveLetters(const std::wstring& driveLetters) {
     }
 }
 
+void ApplyWindowsVolumeLabels(int diskNumber, const std::wstring& newLabel) {
+    if (newLabel.empty() || diskNumber < 0) return;
+
+    Sleep(500);
+
+    DWORD logicalDrives = GetLogicalDrives();
+    for (int i = 0; i < 26; ++i) {
+        if (logicalDrives & (1 << i)) {
+            wchar_t driveLetter = L'A' + i;
+            wchar_t volPath[] = L"\\\\.\\A:";
+            volPath[4] = driveLetter;
+
+            HANDLE hVol = CreateFileW(volPath, GENERIC_READ,
+                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                      NULL, OPEN_EXISTING, 0, NULL);
+            if (hVol != INVALID_HANDLE_VALUE) {
+                bool belongs = VolumeBelongsToDisk(hVol, diskNumber);
+                CloseHandle(hVol);
+                if (belongs) {
+                    wchar_t root[] = L"A:\\";
+                    root[0] = driveLetter;
+                    BOOL ok = SetVolumeLabelW(root, newLabel.c_str());
+                    RawWriter::Log(L"SetVolumeLabelW on " + std::wstring(root) +
+                                   L" to '" + newLabel + L"': " + (ok ? L"success" : L"failed err=" + std::to_wstring(GetLastError())));
+                    SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH, root, NULL);
+                }
+            }
+        }
+    }
+}
+
 struct BurnCleanup {
     HANDLE hIso = INVALID_HANDLE_VALUE;
     HANDLE hDisk = INVALID_HANDLE_VALUE;
@@ -229,6 +278,8 @@ struct BurnCleanup {
     BYTE* verifyBuffer = nullptr;
     std::wstring devicePath;
     std::wstring driveLetters;
+    int diskNumber = -1;
+    std::wstring volumeLabel;
 
     ~BurnCleanup() {
         if (buffer) VirtualFree(buffer, 0, MEM_RELEASE);
@@ -265,9 +316,59 @@ struct BurnCleanup {
                 CloseHandle(hRefresh);
             }
             NotifyDriveLetters(driveLetters);
+            if (!volumeLabel.empty() && diskNumber >= 0) {
+                ApplyWindowsVolumeLabels(diskNumber, volumeLabel);
+            }
         }
     }
 };
+
+bool PatchIso9660VolumeLabel(HANDLE hDisk, const std::wstring& newLabel, DWORD sectorSize) {
+    if (newLabel.empty()) return true;
+
+    // ISO 9660 Primary Volume Descriptor is at sector 16 (offset 32768 = 16 * 2048)
+    DWORD ioSize = (sectorSize < 2048) ? 2048 : sectorSize;
+    if (ioSize % sectorSize != 0) ioSize = ((ioSize + sectorSize - 1) / sectorSize) * sectorSize;
+
+    BYTE* pvdBuf = (BYTE*)VirtualAlloc(NULL, ioSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!pvdBuf) return false;
+
+    LARGE_INTEGER li;
+    li.QuadPart = 32768; // 16 * 2048
+    if (!SetFilePointerEx(hDisk, li, NULL, FILE_BEGIN)) {
+        VirtualFree(pvdBuf, 0, MEM_RELEASE);
+        return false;
+    }
+
+    DWORD bytesRead = 0;
+    if (!ReadFile(hDisk, pvdBuf, ioSize, &bytesRead, NULL) || bytesRead < 2048) {
+        VirtualFree(pvdBuf, 0, MEM_RELEASE);
+        return false;
+    }
+
+    // Check PVD signature: byte 0 is 1 (PVD), bytes 1..5 are "CD001"
+    if (pvdBuf[0] == 1 && memcmp(pvdBuf + 1, "CD001", 5) == 0) {
+        char asciiLabel[32];
+        memset(asciiLabel, ' ', sizeof(asciiLabel));
+        for (size_t i = 0; i < newLabel.size() && i < 32; ++i) {
+            wchar_t wc = newLabel[i];
+            if (wc < 128) asciiLabel[i] = (char)toupper(wc);
+            else asciiLabel[i] = '_';
+        }
+
+        // PVD Volume Identifier is at bytes 40..71 (32 bytes)
+        memcpy(pvdBuf + 40, asciiLabel, 32);
+
+        SetFilePointerEx(hDisk, li, NULL, FILE_BEGIN);
+        DWORD bytesWritten = 0;
+        WriteFile(hDisk, pvdBuf, ioSize, &bytesWritten, NULL);
+        FlushFileBuffers(hDisk);
+        RawWriter::Log(L"Patched ISO 9660 PVD volume label: " + newLabel);
+    }
+
+    VirtualFree(pvdBuf, 0, MEM_RELEASE);
+    return true;
+}
 
 bool PatchBootSector(HANDLE hDisk, BootWriteMode mode, DWORD sectorSize, std::wstring& error) {
     if (mode == BootWriteMode::AsImage) return true;
@@ -348,6 +449,8 @@ WriteResult RawWriter::BurnImage(const WriteParams& params, ProgressFn progressC
     BurnCleanup st;
     st.devicePath = params.targetDrive.devicePath;
     st.driveLetters = params.targetDrive.driveLetters;
+    st.diskNumber = params.targetDrive.physicalDriveIndex;
+    st.volumeLabel = params.volumeLabel;
 
     st.hIso = CreateFileW(params.sourceIsoPath.c_str(), GENERIC_READ,
                           FILE_SHARE_READ, NULL, OPEN_EXISTING,
@@ -455,8 +558,15 @@ WriteResult RawWriter::BurnImage(const WriteParams& params, ProgressFn progressC
         }
 
         DWORD bytesWritten = 0;
-        if (!WriteFile(st.hDisk, st.buffer, writeSize, &bytesWritten, NULL) || bytesWritten != writeSize) {
-            DWORD err = GetLastError();
+        BOOL ok = FALSE;
+        DWORD err = 0;
+        for (int retry = 0; retry < 5; ++retry) {
+            ok = WriteFile(st.hDisk, st.buffer, writeSize, &bytesWritten, NULL);
+            if (ok && bytesWritten == writeSize) break;
+            err = GetLastError();
+            Sleep(100);
+        }
+        if (!ok || bytesWritten != writeSize) {
             outErrorMessage = L"Ошибка записи на диск (код " + std::to_wstring(err) + L"): " + GetSystemErrorMessage(err);
             Log(outErrorMessage + L" at offset " + std::to_wstring(diskOffset));
             return WriteResult::WriteError;
@@ -559,7 +669,11 @@ WriteResult RawWriter::BurnImage(const WriteParams& params, ProgressFn progressC
                 }
             }
         }
-        Log(L"Verification passed successfully: " + std::to_wstring(totalVerified) + L" bytes.");
+        if (progressCallback) {
+            progressCallback(100, L"Верификация: 100% — УСПЕШНО (данные полностью совпадают!)");
+            Sleep(400);
+        }
+        Log(L"Verification passed successfully: " + std::to_wstring(totalVerified) + L" bytes (100% match).");
     }
 
     // 6. Apply boot mode flags if requested
@@ -569,6 +683,11 @@ WriteResult RawWriter::BurnImage(const WriteParams& params, ProgressFn progressC
             Log(outErrorMessage);
             return WriteResult::WriteError;
         }
+    }
+
+    // 7. Patch ISO 9660 volume label if specified
+    if (!params.volumeLabel.empty()) {
+        PatchIso9660VolumeLabel(st.hDisk, params.volumeLabel, sectorSize);
     }
 
     Log(L"BurnImage completed successfully!");

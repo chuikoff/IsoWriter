@@ -71,6 +71,11 @@ INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if (letters.empty()) letters = L"(нет назначенных букв / RAW)";
         SetDlgItemTextW(hDlg, IDC_STATIC_TARGET_LETTERS, letters.c_str());
 
+        // Pre-fill Volume Label from ISO info
+        SendDlgItemMessageW(hDlg, IDC_EDIT_VOLUME_LABEL, EM_SETLIMITTEXT, 32, 0);
+        std::wstring defaultLabel = ctx->isoInfo ? ctx->isoInfo->volumeLabel : L"";
+        SetDlgItemTextW(hDlg, IDC_EDIT_VOLUME_LABEL, defaultLabel.c_str());
+
         // Always enable all boot modes and load default settings
         EnableWindow(GetDlgItem(hDlg, IDC_RADIO_BOOT_IMAGE), TRUE);
         EnableWindow(GetDlgItem(hDlg, IDC_RADIO_BOOT_UEFI), TRUE);
@@ -132,6 +137,13 @@ INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 ctx->result.verify = (IsDlgButtonChecked(hDlg, IDC_CHECK_VERIFY) == BST_CHECKED);
                 ctx->result.bootMode = ModeFromRadio(hDlg);
                 ctx->result.confirmed = true;
+
+                wchar_t lblBuf[64] = {0};
+                GetDlgItemTextW(hDlg, IDC_EDIT_VOLUME_LABEL, lblBuf, 60);
+                std::wstring lbl = lblBuf;
+                while (!lbl.empty() && lbl.back() == L' ') lbl.pop_back();
+                while (!lbl.empty() && lbl.front() == L' ') lbl.erase(lbl.begin());
+                ctx->result.volumeLabel = lbl;
             }
             EndDialog(hDlg, IDOK);
             return TRUE;

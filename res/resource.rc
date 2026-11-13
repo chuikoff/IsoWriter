@@ -44,20 +44,22 @@ BEGIN
     LTEXT           "Формат:", IDC_STATIC, 18, 42, 30, 8
     LTEXT           "", IDC_STATIC_BOOT_TYPE, 52, 42, 270, 8
 
-    GROUPBOX        "Целевой USB-накопитель", IDC_STATIC, 10, 58, 320, 50
-    LTEXT           "Устройство:", IDC_STATIC, 18, 70, 45, 8
-    LTEXT           "", IDC_STATIC_TARGET_NAME, 68, 70, 254, 8
-    LTEXT           "Емкость:", IDC_STATIC, 18, 82, 45, 8
-    LTEXT           "", IDC_STATIC_TARGET_CAPACITY, 68, 82, 90, 8
-    LTEXT           "Разделы:", IDC_STATIC, 18, 94, 45, 8
-    LTEXT           "", IDC_STATIC_TARGET_LETTERS, 68, 94, 254, 8
+    GROUPBOX        "Целевой USB-накопитель", IDC_STATIC, 10, 56, 320, 64
+    LTEXT           "Устройство:", IDC_STATIC, 18, 68, 45, 8
+    LTEXT           "", IDC_STATIC_TARGET_NAME, 68, 68, 254, 8
+    LTEXT           "Емкость:", IDC_STATIC, 18, 80, 45, 8
+    LTEXT           "", IDC_STATIC_TARGET_CAPACITY, 68, 80, 90, 8
+    LTEXT           "Разделы:", IDC_STATIC, 18, 92, 45, 8
+    LTEXT           "", IDC_STATIC_TARGET_LETTERS, 68, 92, 254, 8
+    LTEXT           "Метка тома:", IDC_STATIC, 18, 105, 48, 8
+    EDITTEXT        IDC_EDIT_VOLUME_LABEL, 68, 103, 254, 13, ES_AUTOHSCROLL
 
-    GROUPBOX        "Режим загрузки", IDC_STATIC, 10, 110, 320, 96
-    CONTROL         "Как в образе (DD)", IDC_RADIO_BOOT_IMAGE, "Button", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 18, 122, 140, 10
-    CONTROL         "UEFI", IDC_RADIO_BOOT_UEFI, "Button", BS_AUTORADIOBUTTON | WS_TABSTOP, 18, 136, 70, 10
-    CONTROL         "Legacy", IDC_RADIO_BOOT_LEGACY, "Button", BS_AUTORADIOBUTTON | WS_TABSTOP, 100, 136, 70, 10
-    CONTROL         "UEFI и Legacy", IDC_RADIO_BOOT_BOTH, "Button", BS_AUTORADIOBUTTON | WS_TABSTOP, 180, 136, 130, 10
-    LTEXT           "", IDC_STATIC_BOOT_DESC, 18, 152, 304, 48
+    GROUPBOX        "Режим загрузки", IDC_STATIC, 10, 124, 320, 84
+    CONTROL         "Как в образе (DD)", IDC_RADIO_BOOT_IMAGE, "Button", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 18, 136, 140, 10
+    CONTROL         "UEFI", IDC_RADIO_BOOT_UEFI, "Button", BS_AUTORADIOBUTTON | WS_TABSTOP, 18, 150, 70, 10
+    CONTROL         "Legacy", IDC_RADIO_BOOT_LEGACY, "Button", BS_AUTORADIOBUTTON | WS_TABSTOP, 100, 150, 70, 10
+    CONTROL         "UEFI и Legacy", IDC_RADIO_BOOT_BOTH, "Button", BS_AUTORADIOBUTTON | WS_TABSTOP, 180, 150, 130, 10
+    LTEXT           "", IDC_STATIC_BOOT_DESC, 18, 164, 304, 40
 
     CONTROL         "ВНИМАНИЕ: Все разделы и данные на флешке будут уничтожены!",
                     IDC_STATIC_WARNING, "Static", SS_LEFT | WS_GROUP, 12, 212, 316, 12
