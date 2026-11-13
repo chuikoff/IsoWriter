@@ -21,6 +21,7 @@ set(SOURCES
     src/drive_enum.cpp
     src/iso_detect.cpp
     src/raw_writer.cpp
+    src/iso_unpack.cpp
     src/write_dialog.cpp
     src/settings.cpp
     res/resource.rc
@@ -49,4 +50,5 @@ target_link_libraries(IsoWriter PRIVATE
     gdi32
     shell32
     advapi32
+    virtdisk
 )

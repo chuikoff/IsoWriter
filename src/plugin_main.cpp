@@ -36,13 +36,24 @@ std::wstring ResultText(const WriteParams& params, WriteResult result, const std
         if (!params.volumeLabel.empty()) {
             text += L"Метка тома:\n  " + params.volumeLabel + L"\n\n";
         }
-        if (params.verifyAfterWrite) {
-            text += L"Побайтовая проверка (верификация):\n  100% СОВПАДЕНИЕ — ошибок не обнаружено!\n\n";
+        if (params.unpackPlainIso) {
+            text += L"Метод записи:\n  Создание загрузочного раздела Windows (FAT32/NTFS) с поддержкой UEFI/BIOS.\n\n";
+            if (params.verifyAfterWrite) {
+                text += L"Проверка:\n  Все загрузочные файлы Windows на месте.\n\n";
+            }
+        } else {
+            text += L"Метод записи:\n  Побайтовая копия (DD).\n\n";
+            if (params.verifyAfterWrite) {
+                text += L"Побайтовая проверка (верификация):\n  100% СОВПАДЕНИЕ — ошибок не обнаружено!\n\n";
+            }
         }
         if (params.bootMode != BootWriteMode::AsImage) {
             text += L"Режим загрузки:\n  ";
             text += BootWriteModeName(params.bootMode);
             text += L"\n";
+        }
+        if (!error.empty()) {
+            text += L"\n" + error;
         }
         return text;
     }
@@ -298,13 +309,14 @@ __declspec(dllexport) int __stdcall FsPutFileW(WCHAR* LocalName, WCHAR* RemoteNa
         return FS_FILE_USERABORT;
     }
 
-    // 6. Execute Raw Burn
+    // 6. Execute Burn / Unpack
     WriteParams params;
     params.sourceIsoPath = localPath;
     params.targetDrive = targetDrive;
     params.verifyAfterWrite = dlgResult.verify;
     params.bootMode = dlgResult.bootMode;
     params.volumeLabel = dlgResult.volumeLabel;
+    params.unpackPlainIso = isoInfo.hasIso9660 && !isoInfo.hasMbr && !isoInfo.hasGpt;
 
     auto progressCallback = [&](int percentDone, const std::wstring& statusText) -> bool {
         if (g_pProgressProcW) {
@@ -319,7 +331,9 @@ __declspec(dllexport) int __stdcall FsPutFileW(WCHAR* LocalName, WCHAR* RemoteNa
     };
 
     std::wstring errorMsg;
-    WriteResult result = RawWriter::BurnImage(params, progressCallback, errorMsg);
+    WriteResult result = params.unpackPlainIso
+        ? RawWriter::UnpackIso(params, progressCallback, errorMsg)
+        : RawWriter::BurnImage(params, progressCallback, errorMsg);
 
     HWND msgParent = hParent ? hParent : (g_hTcWnd ? g_hTcWnd : FindTcMainWindow());
 

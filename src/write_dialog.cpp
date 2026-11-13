@@ -26,22 +26,39 @@ BootWriteMode ModeFromRadio(HWND hDlg) {
     return BootWriteMode::AsImage;
 }
 
-void UpdateBootDesc(HWND hDlg) {
+void UpdateBootDesc(HWND hDlg, const IsoFileInfo* isoInfo) {
     BootWriteMode mode = ModeFromRadio(hDlg);
+    bool isPlainIso = isoInfo && isoInfo->hasIso9660 && !isoInfo->hasMbr && !isoInfo->hasGpt;
+
     const wchar_t* text = L"";
-    switch (mode) {
-    case BootWriteMode::AsImage:
-        text = L"Прямая побайтовая копия (DD). Флаги и структура образа переносятся без изменений.";
-        break;
-    case BootWriteMode::Uefi:
-        text = L"Режим UEFI: образ пишется побайтно, флаг загрузки BIOS (0x80) в MBR сбрасывается.";
-        break;
-    case BootWriteMode::Legacy:
-        text = L"Режим Legacy BIOS: образ пишется побайтно, основной раздел помечается активным (0x80) в MBR.";
-        break;
-    case BootWriteMode::Both:
-        text = L"Режим UEFI и Legacy: образ пишется побайтно, раздел помечается активным, раздел EFI сохраняется.";
-        break;
+    if (isPlainIso) {
+        switch (mode) {
+        case BootWriteMode::AsImage:
+        case BootWriteMode::Both:
+            text = L"Образ Windows: создаётся загрузочный раздел FAT32 для UEFI и BIOS. Файлы образа распаковываются на USB.";
+            break;
+        case BootWriteMode::Uefi:
+            text = L"Режим только UEFI: создаётся раздел FAT32. Загрузка через \\EFI\\BOOT\\BOOTX64.EFI.";
+            break;
+        case BootWriteMode::Legacy:
+            text = L"Режим Legacy BIOS: создаётся активный раздел NTFS/FAT32 с загрузочным сектором bootsect /nt60.";
+            break;
+        }
+    } else {
+        switch (mode) {
+        case BootWriteMode::AsImage:
+            text = L"Прямая побайтовая копия (DD). Флаги и структура образа переносятся без изменений.";
+            break;
+        case BootWriteMode::Uefi:
+            text = L"Режим UEFI: образ пишется побайтно, флаг загрузки BIOS (0x80) в MBR сбрасывается.";
+            break;
+        case BootWriteMode::Legacy:
+            text = L"Режим Legacy BIOS: образ пишется побайтно, основной раздел помечается активным (0x80) в MBR.";
+            break;
+        case BootWriteMode::Both:
+            text = L"Режим UEFI и Legacy: образ пишется побайтно, раздел помечается активным, раздел EFI сохраняется.";
+            break;
+        }
     }
     SetDlgItemTextW(hDlg, IDC_STATIC_BOOT_DESC, text);
 }
@@ -88,7 +105,12 @@ INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         CheckDlgButton(hDlg, IDC_CHECK_CONFIRM, BST_UNCHECKED);
         EnableWindow(GetDlgItem(hDlg, IDOK), FALSE);
 
-        UpdateBootDesc(hDlg);
+        bool isPlainIso = ctx->isoInfo && ctx->isoInfo->hasIso9660 && !ctx->isoInfo->hasMbr && !ctx->isoInfo->hasGpt;
+        if (isPlainIso) {
+            SetDlgItemTextW(hDlg, IDC_RADIO_BOOT_IMAGE, L"Как в образе (FAT32, UEFI + BIOS)");
+        }
+
+        UpdateBootDesc(hDlg, ctx->isoInfo);
         return TRUE;
     }
 
@@ -112,7 +134,7 @@ INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if ((wmId == IDC_RADIO_BOOT_IMAGE || wmId == IDC_RADIO_BOOT_UEFI ||
              wmId == IDC_RADIO_BOOT_LEGACY || wmId == IDC_RADIO_BOOT_BOTH) &&
             wmEvent == BN_CLICKED) {
-            UpdateBootDesc(hDlg);
+            UpdateBootDesc(hDlg, ctx ? ctx->isoInfo : nullptr);
             return TRUE;
         }
 
