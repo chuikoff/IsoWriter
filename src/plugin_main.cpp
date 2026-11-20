@@ -167,7 +167,7 @@ __declspec(dllexport) HANDLE __stdcall FsFindFirstW(WCHAR* Path, WIN32_FIND_DATA
 
         WIN32_FIND_DATAW fdConfig = {0};
         fdConfig.dwFileAttributes = FILE_ATTRIBUTE_NORMAL;
-        wcsncpy_s(fdConfig.cFileName, L"[Настройки плагина (двойной клик)]", _TRUNCATE);
+        wcsncpy_s(fdConfig.cFileName, L"[Настройки плагина]", _TRUNCATE);
         ctx->entries.push_back(fdConfig);
     } else {
         WIN32_FIND_DATAW fd = {0};

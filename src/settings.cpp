@@ -22,6 +22,9 @@ INT_PTR CALLBACK SettingsDialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM 
         if (bootSel < 0 || bootSel > 3) bootSel = 0;
         SendMessageW(hBoot, CB_SETCURSEL, bootSel, 0);
 
+        SetDlgItemTextW(hDlg, IDC_STATIC_SETTINGS_VERSION, (std::wstring(L"Версия ") + kPluginVersion).c_str());
+        SetWindowTextW(hDlg, (std::wstring(L"Настройки IsoWriter v") + kPluginVersion).c_str());
+
         return TRUE;
     }
 
