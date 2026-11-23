@@ -108,9 +108,38 @@ bool VolumeBelongsToDisk(HANDLE hVol, int diskNumber) {
     return false;
 }
 
+// Returns false when path is a volume of diskNumber and it could not be locked.
+// shortcut: a volume that cannot be opened at all is treated as not ours, upgrade if writes still land on a busy stick
+bool TryLockVolume(const std::wstring& path, int diskNumber, std::vector<HANDLE>& outHandles) {
+    HANDLE hVol = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, OPEN_EXISTING, 0, NULL);
+    if (hVol == INVALID_HANDLE_VALUE) {
+        HANDLE probe = CreateFileW(path.c_str(), 0,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                   NULL, OPEN_EXISTING, 0, NULL);
+        if (probe == INVALID_HANDLE_VALUE) return true;
+        bool ours = VolumeBelongsToDisk(probe, diskNumber);
+        CloseHandle(probe);
+        return !ours;
+    }
+    if (!VolumeBelongsToDisk(hVol, diskNumber)) {
+        CloseHandle(hVol);
+        return true;
+    }
+    if (!LockAndDismountHandle(hVol, path)) {
+        CloseHandle(hVol);
+        return false;
+    }
+    outHandles.push_back(hVol);
+    return true;
+}
+
 // Locks all volumes and partitions on the disk. Handles are added to outHandles
 // and MUST be kept open during write to prevent Windows from denying access.
-void LockAndDismountAllDiskVolumes(int diskNumber, std::vector<HANDLE>& outHandles) {
+// Returns false if a volume of this disk could not be locked.
+bool LockAndDismountAllDiskVolumes(int diskNumber, std::vector<HANDLE>& outHandles) {
+    bool lockFailed = false;
     // 1. Lock drive letters (e.g. \\.\F:)
     DWORD logicalDrives = GetLogicalDrives();
     std::vector<wchar_t> lockedLetters;
@@ -120,20 +149,11 @@ void LockAndDismountAllDiskVolumes(int diskNumber, std::vector<HANDLE>& outHandl
             wchar_t volPath[] = L"\\\\.\\A:";
             volPath[4] = driveLetter;
 
-            HANDLE hVol = CreateFileW(volPath, GENERIC_READ | GENERIC_WRITE,
-                                      FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                      NULL, OPEN_EXISTING, 0, NULL);
-            if (hVol != INVALID_HANDLE_VALUE) {
-                if (VolumeBelongsToDisk(hVol, diskNumber)) {
-                    if (LockAndDismountHandle(hVol, volPath)) {
-                        outHandles.push_back(hVol);
-                        lockedLetters.push_back(driveLetter);
-                    } else {
-                        CloseHandle(hVol);
-                    }
-                } else {
-                    CloseHandle(hVol);
-                }
+            size_t before = outHandles.size();
+            if (!TryLockVolume(volPath, diskNumber, outHandles)) {
+                lockFailed = true;
+            } else if (outHandles.size() > before) {
+                lockedLetters.push_back(driveLetter);
             }
         }
     }
@@ -162,45 +182,34 @@ void LockAndDismountAllDiskVolumes(int diskNumber, std::vector<HANDLE>& outHandl
 
             std::wstring openPath = volumeName;
             if (!openPath.empty() && openPath.back() == L'\\') openPath.pop_back();
-
-            HANDLE hQuery = CreateFileW(openPath.c_str(), GENERIC_READ | GENERIC_WRITE,
-                                        FILE_SHARE_READ | FILE_SHARE_WRITE,
-                                        NULL, OPEN_EXISTING, 0, NULL);
-            if (hQuery != INVALID_HANDLE_VALUE) {
-                if (VolumeBelongsToDisk(hQuery, diskNumber)) {
-                    if (LockAndDismountHandle(hQuery, openPath)) {
-                        outHandles.push_back(hQuery);
-                    } else {
-                        CloseHandle(hQuery);
-                    }
-                } else {
-                    CloseHandle(hQuery);
-                }
-            }
+            if (!TryLockVolume(openPath, diskNumber, outHandles)) lockFailed = true;
         } while (FindNextVolumeW(hFind, volumeName, MAX_PATH));
         FindVolumeClose(hFind);
     }
 
-    // 3. If no volumes were locked yet (e.g. raw / Linux partitions), try locking partitions directly
-    if (outHandles.empty()) {
+    // 3. If no volumes were found (e.g. raw / Linux partitions), try locking partitions directly.
+    // The path already names this disk, so an open handle that will not lock is a failure.
+    if (!lockFailed && outHandles.empty()) {
         for (int p = 1; p <= 16; ++p) {
             std::wstring partPath = L"\\\\?\\GLOBALROOT\\Device\\Harddisk" +
                                     std::to_wstring(diskNumber) + L"\\Partition" + std::to_wstring(p);
             HANDLE hPart = CreateFileW(partPath.c_str(), GENERIC_READ | GENERIC_WRITE,
                                        FILE_SHARE_READ | FILE_SHARE_WRITE,
                                        NULL, OPEN_EXISTING, 0, NULL);
-            if (hPart != INVALID_HANDLE_VALUE) {
-                if (LockAndDismountHandle(hPart, partPath)) {
-                    outHandles.push_back(hPart);
-                } else {
-                    CloseHandle(hPart);
-                }
+            if (hPart == INVALID_HANDLE_VALUE) continue;
+            if (!LockAndDismountHandle(hPart, partPath)) {
+                CloseHandle(hPart);
+                lockFailed = true;
+            } else {
+                outHandles.push_back(hPart);
             }
         }
     }
 
     RawWriter::Log(L"Total locked volume/partition handles for Disk " +
-                   std::to_wstring(diskNumber) + L": " + std::to_wstring(outHandles.size()));
+                   std::to_wstring(diskNumber) + L": " + std::to_wstring(outHandles.size()) +
+                   (lockFailed ? L" (lock failed)" : L""));
+    return !lockFailed;
 }
 
 HANDLE OpenPhysicalForWrite(const std::wstring& path) {
@@ -242,11 +251,11 @@ void NotifyDriveLetters(const std::wstring& driveLetters) {
 void ApplyWindowsVolumeLabels(int diskNumber, const std::wstring& newLabel) {
     if (newLabel.empty() || diskNumber < 0) return;
 
-    Sleep(500);
-
-    DWORD logicalDrives = GetLogicalDrives();
-    for (int i = 0; i < 26; ++i) {
-        if (logicalDrives & (1 << i)) {
+    for (int attempt = 0; attempt < 10; ++attempt) {
+        bool labeled = false;
+        DWORD logicalDrives = GetLogicalDrives();
+        for (int i = 0; i < 26; ++i) {
+            if ((logicalDrives & (1 << i)) == 0) continue;
             wchar_t driveLetter = L'A' + i;
             wchar_t volPath[] = L"\\\\.\\A:";
             volPath[4] = driveLetter;
@@ -254,19 +263,20 @@ void ApplyWindowsVolumeLabels(int diskNumber, const std::wstring& newLabel) {
             HANDLE hVol = CreateFileW(volPath, GENERIC_READ,
                                       FILE_SHARE_READ | FILE_SHARE_WRITE,
                                       NULL, OPEN_EXISTING, 0, NULL);
-            if (hVol != INVALID_HANDLE_VALUE) {
-                bool belongs = VolumeBelongsToDisk(hVol, diskNumber);
-                CloseHandle(hVol);
-                if (belongs) {
-                    wchar_t root[] = L"A:\\";
-                    root[0] = driveLetter;
-                    BOOL ok = SetVolumeLabelW(root, newLabel.c_str());
-                    RawWriter::Log(L"SetVolumeLabelW on " + std::wstring(root) +
-                                   L" to '" + newLabel + L"': " + (ok ? L"success" : L"failed err=" + std::to_wstring(GetLastError())));
-                    SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH, root, NULL);
-                }
-            }
+            if (hVol == INVALID_HANDLE_VALUE) continue;
+            bool belongs = VolumeBelongsToDisk(hVol, diskNumber);
+            CloseHandle(hVol);
+            if (!belongs) continue;
+            wchar_t root[] = L"A:\\";
+            root[0] = driveLetter;
+            BOOL ok = SetVolumeLabelW(root, newLabel.c_str());
+            RawWriter::Log(L"SetVolumeLabelW on " + std::wstring(root) +
+                           L" to '" + newLabel + L"': " + (ok ? L"success" : L"failed err=" + std::to_wstring(GetLastError())));
+            SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH, root, NULL);
+            labeled = true;
         }
+        if (labeled) return;
+        Sleep(50);
     }
 }
 
@@ -280,6 +290,7 @@ struct BurnCleanup {
     std::wstring driveLetters;
     int diskNumber = -1;
     std::wstring volumeLabel;
+    bool commitLabel = false;
 
     ~BurnCleanup() {
         if (buffer) VirtualFree(buffer, 0, MEM_RELEASE);
@@ -316,58 +327,173 @@ struct BurnCleanup {
                 CloseHandle(hRefresh);
             }
             NotifyDriveLetters(driveLetters);
-            if (!volumeLabel.empty() && diskNumber >= 0) {
+            if (commitLabel && !volumeLabel.empty() && diskNumber >= 0) {
                 ApplyWindowsVolumeLabels(diskNumber, volumeLabel);
             }
         }
     }
 };
 
-bool PatchIso9660VolumeLabel(HANDLE hDisk, const std::wstring& newLabel, DWORD sectorSize) {
+uint32_t Crc32(const void* data, size_t len) {
+    static uint32_t table[256];
+    static bool ready = false;
+    if (!ready) {
+        for (uint32_t i = 0; i < 256; ++i) {
+            uint32_t c = i;
+            for (int k = 0; k < 8; ++k) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
+            table[i] = c;
+        }
+        ready = true;
+    }
+    uint32_t crc = 0xFFFFFFFFu;
+    const BYTE* p = static_cast<const BYTE*>(data);
+    for (size_t i = 0; i < len; ++i) crc = table[(crc ^ p[i]) & 0xFF] ^ (crc >> 8);
+    return crc ^ 0xFFFFFFFFu;
+}
+
+uint32_t ReadLe32(const BYTE* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+void WriteLe32(BYTE* p, uint32_t v) {
+    p[0] = (BYTE)v;
+    p[1] = (BYTE)(v >> 8);
+    p[2] = (BYTE)(v >> 16);
+    p[3] = (BYTE)(v >> 24);
+}
+
+uint64_t ReadLe64(const BYTE* p) {
+    uint64_t v = 0;
+    for (int i = 7; i >= 0; --i) v = (v << 8) | p[i];
+    return v;
+}
+
+void WriteLe64(BYTE* p, uint64_t v) {
+    for (int i = 0; i < 8; ++i) {
+        p[i] = (BYTE)(v & 0xFF);
+        v >>= 8;
+    }
+}
+
+void FillVolumeId(BYTE out[32], const std::wstring& label, bool joliet) {
+    if (joliet) {
+        for (int i = 0; i < 32; i += 2) {
+            out[i] = 0x00;
+            out[i + 1] = 0x20;
+        }
+        size_t n = 0;
+        for (wchar_t wc : label) {
+            if (n >= 16) break;
+            unsigned ch = (wc < 128) ? (unsigned)toupper(wc) : (unsigned)'_';
+            out[n * 2] = (BYTE)((ch >> 8) & 0xFF);
+            out[n * 2 + 1] = (BYTE)(ch & 0xFF);
+            ++n;
+        }
+        return;
+    }
+    memset(out, ' ', 32);
+    size_t n = 0;
+    for (wchar_t wc : label) {
+        if (n >= 32) break;
+        out[n++] = (wc < 128) ? (BYTE)toupper(wc) : (BYTE)'_';
+    }
+}
+
+bool IsJoliet(const BYTE* vd) {
+    return vd[0] == 2 && memcmp(vd + 1, "CD001", 5) == 0 &&
+           vd[88] == 0x25 && vd[89] == 0x2F &&
+           (vd[90] == 0x40 || vd[90] == 0x43 || vd[90] == 0x45);
+}
+
+bool TailSelfCheck() {
+    if (Crc32("123456789", 9) != 0xCBF43926u) return false;
+    BYTE le[8] = {};
+    WriteLe64(le, 0x1122334455667788ull);
+    if (ReadLe64(le) != 0x1122334455667788ull) return false;
+    BYTE id[32];
+    FillVolumeId(id, L"Ab", false);
+    if (id[0] != 'A' || id[1] != 'B' || id[2] != ' ') return false;
+    FillVolumeId(id, L"Ab", true);
+    if (id[0] != 0x00 || id[1] != 'A' || id[2] != 0x00 || id[3] != 'B') return false;
+    if (id[4] != 0x00 || id[5] != 0x20) return false;
+    return true;
+}
+
+bool ReadSectors(HANDLE h, uint64_t offset, BYTE* data, DWORD size) {
+    LARGE_INTEGER li;
+    li.QuadPart = (LONGLONG)offset;
+    DWORD n = 0;
+    return SetFilePointerEx(h, li, NULL, FILE_BEGIN) && ReadFile(h, data, size, &n, NULL) && n == size;
+}
+
+bool WriteSectors(HANDLE h, uint64_t offset, const BYTE* data, DWORD size) {
+    LARGE_INTEGER li;
+    li.QuadPart = (LONGLONG)offset;
+    DWORD n = 0;
+    return SetFilePointerEx(h, li, NULL, FILE_BEGIN) && WriteFile(h, data, size, &n, NULL) && n == size;
+}
+
+bool PatchIso9660VolumeLabel(HANDLE hDisk, const std::wstring& newLabel, DWORD sectorSize, bool& patchedOut) {
+    patchedOut = false;
     if (newLabel.empty()) return true;
 
-    // ISO 9660 Primary Volume Descriptor is at sector 16 (offset 32768 = 16 * 2048)
+    // ISO 9660 descriptors start at sector 16 (offset 32768). A short read must not be written back:
+    // the rest of an aligned buffer is zeros and would wipe the next descriptor.
     DWORD ioSize = (sectorSize < 2048) ? 2048 : sectorSize;
     if (ioSize % sectorSize != 0) ioSize = ((ioSize + sectorSize - 1) / sectorSize) * sectorSize;
 
-    BYTE* pvdBuf = (BYTE*)VirtualAlloc(NULL, ioSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!pvdBuf) return false;
+    BYTE* buf = (BYTE*)VirtualAlloc(NULL, ioSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!buf) return false;
 
-    LARGE_INTEGER li;
-    li.QuadPart = 32768; // 16 * 2048
-    if (!SetFilePointerEx(hDisk, li, NULL, FILE_BEGIN)) {
-        VirtualFree(pvdBuf, 0, MEM_RELEASE);
-        return false;
-    }
-
-    DWORD bytesRead = 0;
-    if (!ReadFile(hDisk, pvdBuf, ioSize, &bytesRead, NULL) || bytesRead < 2048) {
-        VirtualFree(pvdBuf, 0, MEM_RELEASE);
-        return false;
-    }
-
-    // Check PVD signature: byte 0 is 1 (PVD), bytes 1..5 are "CD001"
-    if (pvdBuf[0] == 1 && memcmp(pvdBuf + 1, "CD001", 5) == 0) {
-        char asciiLabel[32];
-        memset(asciiLabel, ' ', sizeof(asciiLabel));
-        for (size_t i = 0; i < newLabel.size() && i < 32; ++i) {
-            wchar_t wc = newLabel[i];
-            if (wc < 128) asciiLabel[i] = (char)toupper(wc);
-            else asciiLabel[i] = '_';
+    bool ok = true;
+    bool patched = false;
+    for (DWORD base = 32768; ok && base < 32768 + 32 * 2048; base += ioSize) {
+        DWORD bytesRead = 0;
+        LARGE_INTEGER li;
+        li.QuadPart = base;
+        if (!SetFilePointerEx(hDisk, li, NULL, FILE_BEGIN) ||
+            !ReadFile(hDisk, buf, ioSize, &bytesRead, NULL) || bytesRead != ioSize) {
+            RawWriter::Log(L"Volume label patch stopped: short read at " + std::to_wstring(base));
+            break;
         }
 
-        // PVD Volume Identifier is at bytes 40..71 (32 bytes)
-        memcpy(pvdBuf + 40, asciiLabel, 32);
+        bool changed = false;
+        bool done = false;
+        for (DWORD off = 0; off + 2048 <= ioSize; off += 2048) {
+            BYTE* vd = buf + off;
+            if (vd[0] == 0xFF) {
+                done = true;
+                break;
+            }
+            bool joliet = IsJoliet(vd);
+            bool primary = vd[0] == 1 && memcmp(vd + 1, "CD001", 5) == 0;
+            bool asciiSvd = vd[0] == 2 && memcmp(vd + 1, "CD001", 5) == 0 && !joliet;
+            if (!primary && !joliet && !asciiSvd) continue;
+            BYTE id[32];
+            FillVolumeId(id, newLabel, joliet);
+            memcpy(vd + 40, id, 32);
+            changed = true;
+        }
 
-        SetFilePointerEx(hDisk, li, NULL, FILE_BEGIN);
-        DWORD bytesWritten = 0;
-        WriteFile(hDisk, pvdBuf, ioSize, &bytesWritten, NULL);
-        FlushFileBuffers(hDisk);
-        RawWriter::Log(L"Patched ISO 9660 PVD volume label: " + newLabel);
+        if (changed) {
+            DWORD bytesWritten = 0;
+            if (!SetFilePointerEx(hDisk, li, NULL, FILE_BEGIN) ||
+                !WriteFile(hDisk, buf, ioSize, &bytesWritten, NULL) || bytesWritten != ioSize) {
+                ok = false;
+                break;
+            }
+            patched = true;
+        }
+        if (done) break;
     }
 
-    VirtualFree(pvdBuf, 0, MEM_RELEASE);
-    return true;
+    if (ok && patched) {
+        FlushFileBuffers(hDisk);
+        RawWriter::Log(L"Patched ISO 9660 / Joliet volume label: " + newLabel);
+    }
+    VirtualFree(buf, 0, MEM_RELEASE);
+    patchedOut = patched;
+    return ok;
 }
 
 bool PatchBootSector(HANDLE hDisk, BootWriteMode mode, DWORD sectorSize, std::wstring& error) {
@@ -379,8 +505,8 @@ bool PatchBootSector(HANDLE hDisk, BootWriteMode mode, DWORD sectorSize, std::ws
     LARGE_INTEGER zero = {0};
     SetFilePointerEx(hDisk, zero, NULL, FILE_BEGIN);
     DWORD bytesRead = 0;
-    if (!ReadFile(hDisk, sector.data(), io, &bytesRead, NULL) || bytesRead < 512) {
-        error = L"Не удалось прочитать загрузочный сектор для настройки режима.";
+    if (!ReadFile(hDisk, sector.data(), io, &bytesRead, NULL) || bytesRead != io) {
+        error = L"Не удалось прочитать загрузочный сектор целиком. Флаги не записаны, чтобы не затереть остаток сектора.";
         return false;
     }
 
@@ -419,7 +545,178 @@ bool PatchBootSector(HANDLE hDisk, BootWriteMode mode, DWORD sectorSize, std::ws
     return true;
 }
 
+// The image's backup GPT sits at the end of the file. On a larger stick the previous
+// backup still occupies the physical end and Windows may resurrect the old layout.
+bool FixDiskTail(HANDLE hDisk, uint64_t writtenBytes, uint64_t diskBytes, DWORD sectorSize, std::wstring& note) {
+    if (sectorSize < 512 || sectorSize > 1024 * 1024 || diskBytes <= writtenBytes || writtenBytes % sectorSize != 0)
+        return true;
+    uint64_t usable = diskBytes / sectorSize * sectorSize;
+    if (usable <= writtenBytes) return true;
+    uint64_t lastLba = usable / sectorSize - 1;
+
+    const DWORD chunk = 1024 * 1024;
+    BYTE* zeros = (BYTE*)VirtualAlloc(NULL, chunk, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!zeros) return false;
+    uint64_t tail = chunk - (chunk % sectorSize);
+    uint64_t start = (usable > tail) ? (usable - tail) : 0;
+    if (start < writtenBytes) start = writtenBytes;
+    bool cleared = false;
+    bool ok = true;
+    for (uint64_t off = start; ok && off < usable; ) {
+        DWORD n = (DWORD)std::min<uint64_t>(chunk, usable - off);
+        n = n / sectorSize * sectorSize;
+        if (n == 0) break;
+        ok = WriteSectors(hDisk, off, zeros, n);
+        off += n;
+        cleared = cleared || ok;
+    }
+    VirtualFree(zeros, 0, MEM_RELEASE);
+    if (!ok) return false;
+    if (cleared) note += L"Последний мегабайт за образом очищен. ";
+
+    BYTE* header = (BYTE*)VirtualAlloc(NULL, sectorSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!header) return false;
+    if (!ReadSectors(hDisk, sectorSize, header, sectorSize)) {
+        VirtualFree(header, 0, MEM_RELEASE);
+        return false;
+    }
+    if (memcmp(header, "EFI PART", 8) != 0) {
+        VirtualFree(header, 0, MEM_RELEASE);
+        return true;
+    }
+
+    uint32_t headerSize = ReadLe32(header + 12);
+    uint64_t backupLba = ReadLe64(header + 32);
+    uint64_t entryLba = ReadLe64(header + 72);
+    uint32_t entryCount = ReadLe32(header + 80);
+    uint32_t entrySize = ReadLe32(header + 84);
+    auto finish = [&](bool success) {
+        VirtualFree(header, 0, MEM_RELEASE);
+        return success;
+    };
+    if (headerSize < 92 || headerSize > sectorSize || backupLba == lastLba ||
+        entryCount == 0 || entrySize == 0 || entrySize > 4096) {
+        return finish(true);
+    }
+    uint64_t entryBytes = (uint64_t)entryCount * entrySize;
+    if (entryBytes == 0 || entryBytes > chunk) return finish(true);
+    uint64_t entrySectors = (entryBytes + sectorSize - 1) / sectorSize;
+    if (lastLba <= entrySectors + 2) return finish(true);
+    uint64_t backupEntriesLba = lastLba - entrySectors;
+    if (backupEntriesLba * sectorSize < writtenBytes) return finish(true);
+    uint64_t lastUsable = backupEntriesLba - 1;
+    if (lastUsable < ReadLe64(header + 48)) return finish(true);
+
+    DWORD entryIo = (DWORD)(entrySectors * sectorSize);
+    BYTE* entries = (BYTE*)VirtualAlloc(NULL, entryIo, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    BYTE* backup = (BYTE*)VirtualAlloc(NULL, sectorSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!entries || !backup) {
+        if (entries) VirtualFree(entries, 0, MEM_RELEASE);
+        if (backup) VirtualFree(backup, 0, MEM_RELEASE);
+        return finish(false);
+    }
+    if (!ReadSectors(hDisk, entryLba * sectorSize, entries, entryIo)) {
+        VirtualFree(entries, 0, MEM_RELEASE);
+        VirtualFree(backup, 0, MEM_RELEASE);
+        return finish(false);
+    }
+
+    memcpy(backup, header, sectorSize);
+    uint64_t primaryLba = ReadLe64(header + 24);
+    WriteLe64(backup + 24, lastLba);
+    WriteLe64(backup + 32, primaryLba);
+    WriteLe64(backup + 48, lastUsable);
+    WriteLe64(backup + 72, backupEntriesLba);
+    WriteLe32(backup + 16, 0);
+    WriteLe32(backup + 16, Crc32(backup, headerSize));
+
+    WriteLe64(header + 32, lastLba);
+    WriteLe64(header + 48, lastUsable);
+    WriteLe32(header + 16, 0);
+    WriteLe32(header + 16, Crc32(header, headerSize));
+
+    ok = WriteSectors(hDisk, backupEntriesLba * sectorSize, entries, entryIo) &&
+         WriteSectors(hDisk, lastLba * sectorSize, backup, sectorSize) &&
+         WriteSectors(hDisk, sectorSize, header, sectorSize);
+    VirtualFree(entries, 0, MEM_RELEASE);
+    VirtualFree(backup, 0, MEM_RELEASE);
+    if (!ok) return finish(false);
+    note += L"Запасная GPT перенесена в конец накопителя. ";
+    RawWriter::Log(L"Relocated backup GPT to LBA " + std::to_wstring(lastLba));
+    return finish(true);
+}
+
 } // namespace
+
+bool RawWriter::ConfirmTarget(const WriteParams& params, std::wstring& error) {
+    if (params.targetDrive.physicalDriveIndex < 0) {
+        error = L"Не выбран физический диск.";
+        return false;
+    }
+    std::wstring expect = L"\\\\.\\PhysicalDrive" + std::to_wstring(params.targetDrive.physicalDriveIndex);
+    if (_wcsicmp(params.targetDrive.devicePath.c_str(), expect.c_str()) != 0) {
+        error = L"Путь накопителя не совпадает с номером диска. Запись отменена.";
+        return false;
+    }
+    if (params.targetDrive.totalSizeBytes == 0) {
+        error = L"Не удалось определить ёмкость накопителя. Запись отменена.";
+        return false;
+    }
+    int sys = DriveEnumerator::GetSystemDriveIndex();
+    if (sys < 0) {
+        error = L"Не удалось определить системный диск. Запись отменена.";
+        return false;
+    }
+    if (params.targetDrive.physicalDriveIndex == sys) {
+        error = L"Критическая ошибка безопасности: попытка записи на системный диск!";
+        return false;
+    }
+
+    HANDLE disk = CreateFileW(params.targetDrive.devicePath.c_str(), GENERIC_READ,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                              NULL, OPEN_EXISTING, 0, NULL);
+    if (disk == INVALID_HANDLE_VALUE) {
+        error = L"Не удалось открыть диск для проверки: " + GetSystemErrorMessage(GetLastError());
+        return false;
+    }
+    STORAGE_PROPERTY_QUERY query = {};
+    query.PropertyId = StorageDeviceProperty;
+    query.QueryType = PropertyStandardQuery;
+    BYTE prop[1024] = {};
+    DWORD n = 0;
+    BOOL busOk = DeviceIoControl(disk, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), prop, sizeof(prop), &n, NULL);
+    STORAGE_DEVICE_DESCRIPTOR* desc = (STORAGE_DEVICE_DESCRIPTOR*)prop;
+    bool usb = busOk && (desc->BusType == BusTypeUsb || desc->BusType == BusTypeSd || desc->BusType == BusTypeMmc);
+
+    GET_LENGTH_INFORMATION len = {};
+    BOOL lenOk = DeviceIoControl(disk, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0, &len, sizeof(len), &n, NULL);
+    DISK_GEOMETRY_EX geom = {};
+    BOOL geomOk = DeviceIoControl(disk, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, NULL, 0, &geom, sizeof(geom), &n, NULL);
+    CloseHandle(disk);
+
+    uint64_t length = lenOk ? (uint64_t)len.Length.QuadPart : 0;
+    uint64_t geometry = geomOk ? (uint64_t)geom.DiskSize.QuadPart : 0;
+    RawWriter::Log(L"Recheck disk " + std::to_wstring(params.targetDrive.physicalDriveIndex) +
+                   L" length=" + std::to_wstring(length) +
+                   L" geometry=" + std::to_wstring(geometry) +
+                   L" expected=" + std::to_wstring(params.targetDrive.totalSizeBytes) +
+                   L" usb=" + std::to_wstring(usb));
+    if (!usb) {
+        error = L"Накопитель больше не USB, SD или MMC. Запись отменена.";
+        return false;
+    }
+    if (lenOk && geomOk && length != geometry) {
+        error = L"Два запроса размера диска разошлись. Запись отменена.";
+        return false;
+    }
+    bool sizeOk = (lenOk && length == params.targetDrive.totalSizeBytes) ||
+                  (!lenOk && geomOk && geometry == params.targetDrive.totalSizeBytes);
+    if (!sizeOk) {
+        error = L"Размер диска изменился. Запись отменена, чтобы не стереть другой накопитель.";
+        return false;
+    }
+    return true;
+}
 
 WriteResult RawWriter::BurnImage(const WriteParams& params, ProgressFn progressCallback, std::wstring& outErrorMessage) {
     outErrorMessage.clear();
@@ -427,6 +724,12 @@ WriteResult RawWriter::BurnImage(const WriteParams& params, ProgressFn progressC
     Log(L"Starting BurnImage for " + params.targetDrive.devicePath +
         L" (Disk " + std::to_wstring(params.targetDrive.physicalDriveIndex) + L")");
     Log(L"Source: " + params.sourceIsoPath);
+
+    if (!TailSelfCheck()) {
+        outErrorMessage = L"Внутренняя проверка CRC и метки тома не прошла. Запись отменена.";
+        Log(outErrorMessage);
+        return WriteResult::WriteError;
+    }
 
     int sysDrive = DriveEnumerator::GetSystemDriveIndex();
     if (sysDrive < 0) {
@@ -485,9 +788,21 @@ WriteResult RawWriter::BurnImage(const WriteParams& params, ProgressFn progressC
         return WriteResult::DiskTooSmall;
     }
 
+    // Re-check the same stick immediately before anything destructive.
+    std::wstring guardError;
+    if (!ConfirmTarget(params, guardError)) {
+        outErrorMessage = guardError;
+        Log(outErrorMessage);
+        return WriteResult::DeviceOpenFailed;
+    }
+
     // 1. Lock and dismount ALL volumes and partitions on target disk.
     // Handles are kept in st.vols and stay open throughout the write!
-    LockAndDismountAllDiskVolumes(params.targetDrive.physicalDriveIndex, st.vols);
+    if (!LockAndDismountAllDiskVolumes(params.targetDrive.physicalDriveIndex, st.vols)) {
+        outErrorMessage = L"Не удалось заблокировать тома накопителя. Закройте все окна с этой флешкой и повторите.";
+        Log(outErrorMessage);
+        return WriteResult::LockVolumeFailed;
+    }
 
     // 2. Open physical drive for raw writing
     st.hDisk = OpenPhysicalForWrite(params.targetDrive.devicePath);
@@ -550,20 +865,20 @@ WriteResult RawWriter::BurnImage(const WriteParams& params, ProgressFn progressC
 
         LARGE_INTEGER li;
         li.QuadPart = (LONGLONG)diskOffset;
-        if (!SetFilePointerEx(st.hDisk, li, NULL, FILE_BEGIN)) {
-            DWORD err = GetLastError();
-            outErrorMessage = L"Ошибка позиционирования на диске (код " + std::to_wstring(err) + L"): " + GetSystemErrorMessage(err);
-            Log(outErrorMessage);
-            return WriteResult::WriteError;
-        }
 
         DWORD bytesWritten = 0;
         BOOL ok = FALSE;
         DWORD err = 0;
         for (int retry = 0; retry < 5; ++retry) {
+            // A failed or short write leaves the pointer past diskOffset. Rewind every attempt.
+            if (!SetFilePointerEx(st.hDisk, li, NULL, FILE_BEGIN)) {
+                err = GetLastError();
+                ok = FALSE;
+                break;
+            }
             ok = WriteFile(st.hDisk, st.buffer, writeSize, &bytesWritten, NULL);
             if (ok && bytesWritten == writeSize) break;
-            err = GetLastError();
+            err = ok ? ERROR_WRITE_FAULT : GetLastError();
             Sleep(100);
         }
         if (!ok || bytesWritten != writeSize) {
@@ -591,7 +906,8 @@ WriteResult RawWriter::BurnImage(const WriteParams& params, ProgressFn progressC
     Log(L"Write loop completed. Total bytes written: " + std::to_wstring(totalBytesWritten));
 
     if (aborted) {
-        Log(L"Запись отменена пользователем.");
+        outErrorMessage = L"Запись отменена. Накопитель уже частично перезаписан, запишите образ ещё раз.";
+        Log(outErrorMessage);
         return WriteResult::Cancelled;
     }
     if (totalBytesWritten != isoBytes) {
@@ -670,26 +986,41 @@ WriteResult RawWriter::BurnImage(const WriteParams& params, ProgressFn progressC
             }
         }
         if (progressCallback) {
-            progressCallback(100, L"Верификация: 100% — УСПЕШНО (данные полностью совпадают!)");
+            progressCallback(100, L"Проверка: образ совпадает с файлом.");
             Sleep(400);
         }
-        Log(L"Verification passed successfully: " + std::to_wstring(totalVerified) + L" bytes (100% match).");
+        Log(L"Verification passed successfully: " + std::to_wstring(totalVerified) + L" bytes matched the file.");
     }
 
-    // 6. Apply boot mode flags if requested
+    std::wstring adjustNote;
+    // Edits below happen after verification, so the final disk is no longer a raw copy.
     if (params.bootMode != BootWriteMode::AsImage) {
         if (progressCallback) progressCallback(100, L"Настройка режима загрузки...");
         if (!PatchBootSector(st.hDisk, params.bootMode, sectorSize, outErrorMessage)) {
             Log(outErrorMessage);
             return WriteResult::WriteError;
         }
+        adjustNote += L"Флаги загрузки записаны после проверки образа. ";
     }
 
-    // 7. Patch ISO 9660 volume label if specified
     if (!params.volumeLabel.empty()) {
-        PatchIso9660VolumeLabel(st.hDisk, params.volumeLabel, sectorSize);
+        bool labelPatched = false;
+        if (!PatchIso9660VolumeLabel(st.hDisk, params.volumeLabel, sectorSize, labelPatched)) {
+            outErrorMessage = L"Не удалось записать метку тома. Дескрипторы ISO не перезаписаны укороченным буфером.";
+            Log(outErrorMessage);
+            return WriteResult::WriteError;
+        }
+        if (labelPatched) adjustNote += L"Метка записана в дескрипторы ISO 9660 и Joliet. ";
     }
 
+    if (!FixDiskTail(st.hDisk, diskOffset, diskBytes, sectorSize, adjustNote)) {
+        outErrorMessage = L"Не удалось очистить хвост накопителя или перенести запасную GPT.";
+        Log(outErrorMessage);
+        return WriteResult::WriteError;
+    }
+    if (!adjustNote.empty()) outErrorMessage = adjustNote;
+
+    st.commitLabel = true;
     Log(L"BurnImage completed successfully!");
     return WriteResult::Success;
 }

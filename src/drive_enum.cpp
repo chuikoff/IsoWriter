@@ -102,6 +102,8 @@ bool DriveEnumerator::IsElevated() {
 std::vector<UsbDriveInfo> DriveEnumerator::EnumerateUsbDrives() {
     std::vector<UsbDriveInfo> drives;
     int systemDriveIdx = GetSystemDriveIndex();
+    // Unknown system disk: show nothing rather than a list that may include it.
+    if (systemDriveIdx < 0) return drives;
 
     // Map drive letters to PhysicalDrive indices
     std::vector<std::pair<int, wchar_t>> letterToPhysicalDrive;

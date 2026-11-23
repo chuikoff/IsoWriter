@@ -7,7 +7,7 @@ if %errorlevel% neq 0 (
     set "CMAKE_EXE=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe"
 )
 
-if not exist "%CMAKE_EXE%" (
+if /I not "%CMAKE_EXE%"=="cmake" if not exist "%CMAKE_EXE%" (
     echo Error: cmake.exe not found!
     exit /b 1
 )

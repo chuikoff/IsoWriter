@@ -124,4 +124,4 @@ public class IconGen {
 }
 '@
 
-[IconGen]::CreateIsoWriterIcon("e:\GeminiTemp\IsoWriter\res\IsoWriter.ico")
+[IconGen]::CreateIsoWriterIcon((Join-Path $PSScriptRoot "res\IsoWriter.ico"))

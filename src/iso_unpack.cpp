@@ -89,17 +89,22 @@ size_t CountOf(const std::string& text, const std::string& needle) {
 }
 
 std::string SanitizeVolumeLabel(const std::wstring& wlabel, CopyFs fs) {
-    if (wlabel.empty()) return "WINISO";
     std::string s;
     for (wchar_t wc : wlabel) {
+        if (wc == L' ') {
+            s += ' ';
+            continue;
+        }
         if (wc > 32 && wc < 127 && wc != '/' && wc != '\\' && wc != ':' && wc != '*' &&
-            wc != '?' && wc != '"' && wc != '<' && wc != '>' && wc != '|' && wc != ' ') {
-            s += (char)toupper(wc);
+            wc != '?' && wc != '"' && wc != '<' && wc != '>' && wc != '|') {
+            s += (char)wc;
         }
     }
-    if (s.empty()) s = "WINISO";
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
     size_t maxLen = (fs == CopyFs::Fat32) ? 11 : 32;
     if (s.size() > maxLen) s.resize(maxLen);
+    while (!s.empty() && s.back() == ' ') s.pop_back();
     return s;
 }
 
@@ -110,9 +115,9 @@ std::string BuildScript(int disk, CopyFs fs, bool active, bool cap32, const std:
     script += "convert mbr\r\n";
     // shortcut: diskpart refuses FAT32 above 32GB, so a larger stick gets a 32000 MB partition
     script += cap32 ? "create partition primary size=32000\r\n" : "create partition primary\r\n";
-    std::string lbl = volumeLabel.empty() ? "WINISO" : volumeLabel;
-    script += fs == CopyFs::Ntfs ? ("format fs=ntfs quick label=" + lbl + "\r\n")
-                                 : ("format fs=fat32 quick label=" + lbl + "\r\n");
+    script += fs == CopyFs::Ntfs ? "format fs=ntfs quick" : "format fs=fat32 quick";
+    if (!volumeLabel.empty()) script += " label=\"" + volumeLabel + "\"";
+    script += "\r\n";
     script += "assign\r\n";
     if (active) script += "active\r\n";
     return script;
@@ -140,12 +145,17 @@ bool UnpackPlanSelfCheck() {
     if (fat.find("select disk 4\r\n") == std::string::npos) return false;
     if (CountOf(fat, "select disk ") != 1 || CountOf(fat, "clean\r\n") != 1) return false;
     if (fat.find("convert mbr\r\n") == std::string::npos) return false;
-    if (fat.find("format fs=fat32 quick label=WINISO\r\n") == std::string::npos) return false;
+    if (fat.find("format fs=fat32 quick label=\"WINISO\"\r\n") == std::string::npos) return false;
     if (fat.find("ntfs") != std::string::npos || fat.find("size=") != std::string::npos) return false;
     if (fat.find("active\r\n") == std::string::npos) return false;
 
     std::string ntfs = BuildScript(4, CopyFs::Ntfs, true, false);
-    if (ntfs.find("format fs=ntfs quick label=WINISO\r\n") == std::string::npos) return false;
+    if (ntfs.find("format fs=ntfs quick label=\"WINISO\"\r\n") == std::string::npos) return false;
+    if (SanitizeVolumeLabel(L"Windows 11", CopyFs::Ntfs) != "Windows 11") return false;
+    if (SanitizeVolumeLabel(L"Win 11", CopyFs::Fat32) != "Win 11") return false;
+    if (!SanitizeVolumeLabel(L"", CopyFs::Fat32).empty()) return false;
+    std::string spaced = BuildScript(4, CopyFs::Ntfs, false, false, SanitizeVolumeLabel(L"Windows 11", CopyFs::Ntfs));
+    if (spaced.find("label=\"Windows 11\"\r\n") == std::string::npos) return false;
     if (ntfs.find("fat32") != std::string::npos) return false;
 
     std::string uefi = BuildScript(4, CopyFs::Fat32, false, true);
@@ -305,126 +315,13 @@ bool FileExists(const std::wstring& path) {
     return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY) == 0;
 }
 
-bool ConfirmTarget(const WriteParams& params, std::wstring& error) {
-    if (params.targetDrive.physicalDriveIndex < 0) {
-        error = L"Не выбран физический диск.";
-        return false;
-    }
-    std::wstring expect = L"\\\\.\\PhysicalDrive" + std::to_wstring(params.targetDrive.physicalDriveIndex);
-    if (_wcsicmp(params.targetDrive.devicePath.c_str(), expect.c_str()) != 0) {
-        error = L"Путь накопителя не совпадает с номером диска. Запись отменена.";
-        return false;
-    }
-    if (params.targetDrive.totalSizeBytes == 0) {
-        error = L"Не удалось определить ёмкость накопителя. Запись отменена.";
-        return false;
-    }
-    int sys = DriveEnumerator::GetSystemDriveIndex();
-    if (sys < 0) {
-        error = L"Не удалось определить системный диск. Запись отменена.";
-        return false;
-    }
-    if (params.targetDrive.physicalDriveIndex == sys) {
-        error = L"Критическая ошибка безопасности: попытка записи на системный диск!";
-        return false;
-    }
-
-    HANDLE disk = CreateFileW(params.targetDrive.devicePath.c_str(), GENERIC_READ,
-                              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                              NULL, OPEN_EXISTING, 0, NULL);
-    if (disk == INVALID_HANDLE_VALUE) {
-        error = L"Не удалось открыть диск для проверки: " + ErrText(GetLastError());
-        return false;
-    }
-    STORAGE_PROPERTY_QUERY query = {};
-    query.PropertyId = StorageDeviceProperty;
-    query.QueryType = PropertyStandardQuery;
-    BYTE prop[1024] = {};
-    DWORD n = 0;
-    BOOL busOk = DeviceIoControl(disk, IOCTL_STORAGE_QUERY_PROPERTY, &query, sizeof(query), prop, sizeof(prop), &n, NULL);
-    STORAGE_DEVICE_DESCRIPTOR* desc = (STORAGE_DEVICE_DESCRIPTOR*)prop;
-    bool usb = busOk && (desc->BusType == BusTypeUsb || desc->BusType == BusTypeSd || desc->BusType == BusTypeMmc);
-
-    GET_LENGTH_INFORMATION len = {};
-    BOOL lenOk = DeviceIoControl(disk, IOCTL_DISK_GET_LENGTH_INFO, NULL, 0, &len, sizeof(len), &n, NULL);
-    DISK_GEOMETRY_EX geom = {};
-    BOOL geomOk = DeviceIoControl(disk, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, NULL, 0, &geom, sizeof(geom), &n, NULL);
-    CloseHandle(disk);
-
-    uint64_t length = lenOk ? (uint64_t)len.Length.QuadPart : 0;
-    uint64_t geometry = geomOk ? (uint64_t)geom.DiskSize.QuadPart : 0;
-    RawWriter::Log(L"Recheck disk " + std::to_wstring(params.targetDrive.physicalDriveIndex) +
-                   L" length=" + std::to_wstring(length) +
-                   L" geometry=" + std::to_wstring(geometry) +
-                   L" expected=" + std::to_wstring(params.targetDrive.totalSizeBytes) +
-                   L" usb=" + std::to_wstring(usb));
-    if (!usb) {
-        error = L"Накопитель больше не USB, SD или MMC. Запись отменена.";
-        return false;
-    }
-    if (lenOk && geomOk && length != geometry) {
-        error = L"Два запроса размера диска разошлись. Запись отменена.";
-        return false;
-    }
-    bool sizeOk = (lenOk && length == params.targetDrive.totalSizeBytes) ||
-                  (!lenOk && geomOk && geometry == params.targetDrive.totalSizeBytes);
-    if (!sizeOk) {
-        error = L"Размер диска изменился. Запись отменена, чтобы не стереть другой накопитель.";
-        return false;
-    }
-    return true;
-}
-
-std::wstring ReadIsoLabel(const std::wstring& path) {
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
-                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (file == INVALID_HANDLE_VALUE) return L"";
-    LARGE_INTEGER pos = {};
-    pos.QuadPart = 32768 + 40;
-    std::wstring label;
-    char buf[32] = {};
-    DWORD n = 0;
-    if (SetFilePointerEx(file, pos, NULL, FILE_BEGIN) && ReadFile(file, buf, 32, &n, NULL) && n == 32) {
-        int end = 31;
-        while (end >= 0 && (buf[end] == ' ' || buf[end] == '\0')) --end;
-        if (end >= 0) {
-            int wlen = MultiByteToWideChar(CP_ACP, 0, buf, end + 1, NULL, 0);
-            if (wlen > 0) {
-                label.resize(wlen);
-                MultiByteToWideChar(CP_ACP, 0, buf, end + 1, label.data(), wlen);
-            }
-        }
-    }
-    CloseHandle(file);
-    return label;
-}
-
 wchar_t PickAddedLetter(DWORD before, DWORD after) {
     DWORD added = after & ~before;
-    wchar_t any = 0;
     for (int i = 0; i < 26; ++i) {
         if ((added & (1u << i)) == 0) continue;
         wchar_t letter = (wchar_t)(L'A' + i);
         std::wstring root = std::wstring(1, letter) + L":\\";
         if (GetDriveTypeW(root.c_str()) == DRIVE_CDROM) return letter;
-        if (!any) any = letter;
-    }
-    return any;
-}
-
-wchar_t FindCdByLabel(const std::wstring& label) {
-    if (label.empty()) return 0;
-    DWORD mask = GetLogicalDrives();
-    for (int i = 0; i < 26; ++i) {
-        if ((mask & (1u << i)) == 0) continue;
-        wchar_t letter = (wchar_t)(L'A' + i);
-        std::wstring root = std::wstring(1, letter) + L":\\";
-        if (GetDriveTypeW(root.c_str()) != DRIVE_CDROM) continue;
-        wchar_t vol[64] = {};
-        if (GetVolumeInformationW(root.c_str(), vol, 64, NULL, NULL, NULL, NULL, 0) &&
-            _wcsicmp(vol, label.c_str()) == 0) {
-            return letter;
-        }
     }
     return 0;
 }
@@ -471,34 +368,70 @@ wchar_t MountIso(const std::wstring& path, const ProgressFn& progress, IsoMount&
         RawWriter::Log(L"OpenVirtualDisk failed " + ErrText(status));
     }
 
-    wchar_t existing = FindCdByLabel(ReadIsoLabel(path));
-    if (existing) {
-        RawWriter::Log(std::wstring(L"Using already mounted ISO ") + existing);
-        return existing;
-    }
     error = L"Не удалось подключить ISO. Если образ уже открыт в проводнике, извлеките его и повторите. " + ErrText(status);
     return 0;
 }
 
+std::wstring FinalPath(const std::wstring& path) {
+    HANDLE h = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) return L"";
+    wchar_t buf[MAX_PATH] = {};
+    DWORD n = GetFinalPathNameByHandleW(h, buf, MAX_PATH, 0);
+    CloseHandle(h);
+    if (n == 0 || n >= MAX_PATH) return L"";
+    return buf;
+}
+
+bool IsInsideIso(const std::wstring& finalPath, const std::wstring& isoRoot) {
+    if (finalPath.empty() || isoRoot.size() < 2) return false;
+    std::wstring root = L"\\\\?\\" + isoRoot;
+    if (_wcsicmp(finalPath.c_str(), root.c_str()) == 0) return true;
+    if (root.back() != L'\\') root.push_back(L'\\');
+    return _wcsnicmp(finalPath.c_str(), root.c_str(), root.size()) == 0;
+}
+
+bool IsAncestor(const std::wstring& target, const std::wstring& here) {
+    if (target.empty() || here.empty() || target.size() >= here.size()) return false;
+    if (_wcsnicmp(here.c_str(), target.c_str(), target.size()) != 0) return false;
+    return here[target.size()] == L'\\';
+}
+
 bool WalkFiles(const std::wstring& dir, int depth, bool& anyBig, bool& nonSplit,
-               std::vector<BigFile>& hits, std::wstring& error) {
+               std::vector<BigFile>& hits, std::wstring& error,
+               const std::wstring& isoRoot, std::vector<std::wstring>& junctions,
+               std::vector<std::wstring>& seenDirs) {
     if (depth > 40) {
         error = L"Слишком глубокая папка в ISO.";
         return false;
     }
+    std::wstring hereFinal = FinalPath(dir);
+    for (const std::wstring& seen : seenDirs) {
+        if (!hereFinal.empty() && _wcsicmp(seen.c_str(), hereFinal.c_str()) == 0) return true;
+    }
+    if (!hereFinal.empty()) seenDirs.push_back(hereFinal);
     WIN32_FIND_DATAW fd;
     HANDLE find = FindFirstFileW((dir + L"\\*").c_str(), &fd);
     if (find == INVALID_HANDLE_VALUE) {
+        if (!hereFinal.empty()) seenDirs.pop_back();
         error = L"Не удалось прочитать папку образа " + dir;
         return false;
     }
     bool ok = true;
     do {
         if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
         std::wstring full = dir + L"\\" + fd.cFileName;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+            std::wstring target = FinalPath(full);
+            std::wstring here = FinalPath(dir);
+            // shortcut: a junction whose final path does not fit in MAX_PATH is skipped, upgrade if an image needs longer links
+            if (!IsInsideIso(target, isoRoot) || IsAncestor(target, here)) continue;
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && full.size() > isoRoot.size())
+                junctions.push_back(full.substr(isoRoot.size()));
+        }
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            if (!WalkFiles(full, depth + 1, anyBig, nonSplit, hits, error)) {
+            if (!WalkFiles(full, depth + 1, anyBig, nonSplit, hits, error, isoRoot, junctions, seenDirs)) {
                 ok = false;
                 break;
             }
@@ -516,6 +449,7 @@ bool WalkFiles(const std::wstring& dir, int depth, bool& anyBig, bool& nonSplit,
         hits.push_back(hit);
     } while (FindNextFileW(find, &fd));
     FindClose(find);
+    if (!hereFinal.empty()) seenDirs.pop_back();
     return ok;
 }
 
@@ -592,7 +526,12 @@ bool WriteScript(const std::string& script, std::wstring& path, std::wstring& er
         error = L"Не удалось найти папку TEMP.";
         return false;
     }
-    path = std::wstring(temp) + L"isowriter_diskpart.txt";
+    wchar_t unique[MAX_PATH] = {};
+    if (GetTempFileNameW(temp, L"iso", 0, unique) == 0) {
+        error = L"Не удалось создать файл сценария diskpart: " + ErrText(GetLastError());
+        return false;
+    }
+    path = unique;
     HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) {
         error = L"Не удалось записать сценарий diskpart: " + ErrText(GetLastError());
@@ -736,7 +675,9 @@ WriteResult RawWriter::UnpackIso(const WriteParams& params, ProgressFn progressC
     std::vector<BigFile> big;
     std::wstring walkError;
     std::wstring isoRoot = std::wstring(1, isoLetter) + L":";
-    if (!WalkFiles(isoRoot, 0, anyBig, nonSplit, big, walkError)) {
+    std::vector<std::wstring> junctions;
+    std::vector<std::wstring> seenDirs;
+    if (!WalkFiles(isoRoot, 0, anyBig, nonSplit, big, walkError, isoRoot, junctions, seenDirs)) {
         return Fail(outErrorMessage, walkError, WriteResult::SourceOpenFailed);
     }
     CopyPlan plan = MakePlan(params.bootMode, anyBig, nonSplit);
@@ -854,6 +795,25 @@ WriteResult RawWriter::UnpackIso(const WriteParams& params, ProgressFn progressC
                     L"Копирование остановилось (код robocopy " + std::to_wstring(copyExit) + L").\n" + LastLines(copyOut),
                     WriteResult::WriteError);
     }
+    for (const std::wstring& rel : junctions) {
+        std::wstring src = isoRoot + rel;
+        std::wstring dst = std::wstring(1, usbLetter) + L":" + rel;
+        EnsureDir(dst);
+        std::wstring linkArgs = Quote(src) + L" " + Quote(dst) + L" /E /R:2 /W:2 /XJ /NFL /NDL /NP";
+        std::wstring linkOut;
+        DWORD linkExit = 16;
+        ran = RunProcess(SystemExe(L"robocopy.exe"), linkArgs, L"", progressCallback, fixed(70),
+                         L"Копирование ссылки...", linkOut, linkExit);
+        Log(L"robocopy junction " + rel + L" exit=" + std::to_wstring(linkExit));
+        if (ran == RunKind::Cancelled) {
+            return Fail(outErrorMessage, L"Копирование отменено. Запишите образ ещё раз.", WriteResult::Cancelled);
+        }
+        if (ran != RunKind::Done || !CopyExitOk(linkExit)) {
+            return Fail(outErrorMessage,
+                        L"Не удалось скопировать папку-ссылку " + rel + L".\n" + LastLines(linkOut),
+                        WriteResult::WriteError);
+        }
+    }
 
     if (plan.fs == CopyFs::Fat32) {
         std::vector<std::wstring> usedSwm;
@@ -928,16 +888,23 @@ WriteResult RawWriter::UnpackIso(const WriteParams& params, ProgressFn progressC
         }
     }
 
+    std::wstring noteBoot;
     if (params.verifyAfterWrite) {
         if (!Step(progressCallback, 98, L"Проверка файлов загрузки...")) {
             return Fail(outErrorMessage, L"Запись отменена. Файлы уже скопированы.", WriteResult::Cancelled);
         }
         std::wstring missing;
-        if (!CopiedBootFiles(plan.effective, isoRoot, std::wstring(1, usbLetter) + L":", missing)) {
+        std::wstring usbRoot = std::wstring(1, usbLetter) + L":";
+        if (!CopiedBootFiles(plan.effective, isoRoot, usbRoot, missing)) {
             return Fail(outErrorMessage,
-                        L"Файлы скопированы, раздел " + std::wstring(1, usbLetter) + L": " + fs +
+                        L"Файлы скопированы, раздел " + usbRoot + L" " + fs +
                         L". На флешку не попал файл загрузки из образа: " + missing + L".",
                         WriteResult::VerificationError);
+        }
+        if (HasLegacyBoot(isoRoot) || HasUefiBoot(isoRoot)) {
+            noteBoot = L" Файлы загрузки из образа есть на флешке.";
+        } else {
+            noteBoot = L" В образе нет bootmgr и efi\\boot\\bootx64.efi, эти файлы не проверялись.";
         }
     }
 
@@ -951,6 +918,7 @@ WriteResult RawWriter::UnpackIso(const WriteParams& params, ProgressFn progressC
         }
     }
     if (!bootNote.empty()) note += L" " + bootNote;
+    note += noteBoot;
     wchar_t root[] = L"A:\\";
     root[0] = usbLetter;
     SHChangeNotify(SHCNE_MEDIAINSERTED, SHCNF_PATH | SHCNF_FLUSH, root, NULL);

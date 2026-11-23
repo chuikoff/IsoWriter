@@ -2,7 +2,7 @@
 #include <windows.h>
 #include <string>
 
-inline constexpr const wchar_t* kPluginVersion = L"0.1";
+inline constexpr const wchar_t* kPluginVersion = L"0.2";
 
 enum class BootWriteMode {
     AsImage = 0,

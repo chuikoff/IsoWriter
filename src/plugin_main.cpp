@@ -38,13 +38,14 @@ std::wstring ResultText(const WriteParams& params, WriteResult result, const std
         }
         if (params.unpackPlainIso) {
             text += L"Метод записи:\n  Создание загрузочного раздела Windows (FAT32/NTFS) с поддержкой UEFI/BIOS.\n\n";
-            if (params.verifyAfterWrite) {
-                text += L"Проверка:\n  Все загрузочные файлы Windows на месте.\n\n";
-            }
         } else {
             text += L"Метод записи:\n  Побайтовая копия (DD).\n\n";
             if (params.verifyAfterWrite) {
-                text += L"Побайтовая проверка (верификация):\n  100% СОВПАДЕНИЕ — ошибок не обнаружено!\n\n";
+                if (error.empty()) {
+                    text += L"Побайтовая проверка (верификация):\n  100% СОВПАДЕНИЕ — ошибок не обнаружено!\n\n";
+                } else {
+                    text += L"Побайтовая проверка (верификация):\n  Образ совпал с файлом. После проверки накопитель изменён, подробности ниже.\n\n";
+                }
             }
         }
         if (params.bootMode != BootWriteMode::AsImage) {

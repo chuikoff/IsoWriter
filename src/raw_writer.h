@@ -36,4 +36,6 @@ public:
     static void Log(const std::wstring& msg);
     static WriteResult BurnImage(const WriteParams& params, ProgressFn progressCallback, std::wstring& outErrorMessage);
     static WriteResult UnpackIso(const WriteParams& params, ProgressFn progressCallback, std::wstring& outErrorMessage);
+    // Re-reads bus type and size so a swapped PhysicalDrive is not wiped.
+    static bool ConfirmTarget(const WriteParams& params, std::wstring& error);
 };

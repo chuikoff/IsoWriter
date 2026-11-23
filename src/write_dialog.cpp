@@ -26,11 +26,15 @@ BootWriteMode ModeFromRadio(HWND hDlg) {
     return BootWriteMode::AsImage;
 }
 
-void UpdateBootDesc(HWND hDlg, const IsoFileInfo* isoInfo) {
+void UpdateBootDesc(HWND hDlg, const DialogContext* ctx) {
     BootWriteMode mode = ModeFromRadio(hDlg);
+    const IsoFileInfo* isoInfo = ctx ? ctx->isoInfo : nullptr;
+    uint64_t diskBytes = (ctx && ctx->driveInfo) ? ctx->driveInfo->totalSizeBytes : 0;
+    uint64_t imageBytes = isoInfo ? isoInfo->fileSize : 0;
     bool isPlainIso = isoInfo && isoInfo->hasIso9660 && !isoInfo->hasMbr && !isoInfo->hasGpt;
+    bool bigFat = diskBytes > (32ull << 30);
 
-    const wchar_t* text = L"";
+    std::wstring text;
     if (isPlainIso) {
         switch (mode) {
         case BootWriteMode::AsImage:
@@ -43,6 +47,11 @@ void UpdateBootDesc(HWND hDlg, const IsoFileInfo* isoInfo) {
         case BootWriteMode::Legacy:
             text = L"Режим Legacy BIOS: создаётся активный раздел NTFS/FAT32 с загрузочным сектором bootsect /nt60.";
             break;
+        }
+        if (bigFat && mode == BootWriteMode::Legacy) {
+            text += L" Файл больше 4 ГБ пишется на NTFS во весь диск, иначе FAT32 только на 32000 МБ.";
+        } else if (bigFat) {
+            text += L" Флешка больше 32 ГБ: раздел FAT32 будет 32000 МБ, остальное не размечается.";
         }
     } else {
         switch (mode) {
@@ -59,8 +68,11 @@ void UpdateBootDesc(HWND hDlg, const IsoFileInfo* isoInfo) {
             text = L"Режим UEFI и Legacy: образ пишется побайтно, раздел помечается активным, раздел EFI сохраняется.";
             break;
         }
+        if (imageBytes > 0 && diskBytes > imageBytes) {
+            text += L" Диск больше образа: последний мегабайт хвоста очищается, запасная GPT переносится в конец.";
+        }
     }
-    SetDlgItemTextW(hDlg, IDC_STATIC_BOOT_DESC, text);
+    SetDlgItemTextW(hDlg, IDC_STATIC_BOOT_DESC, text.c_str());
 }
 
 INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) {
@@ -108,9 +120,10 @@ INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         bool isPlainIso = ctx->isoInfo && ctx->isoInfo->hasIso9660 && !ctx->isoInfo->hasMbr && !ctx->isoInfo->hasGpt;
         if (isPlainIso) {
             SetDlgItemTextW(hDlg, IDC_RADIO_BOOT_IMAGE, L"Как в образе (FAT32, UEFI + BIOS)");
+            SetDlgItemTextW(hDlg, IDC_CHECK_VERIFY, L"Проверить, что файлы загрузки скопированы");
         }
 
-        UpdateBootDesc(hDlg, ctx->isoInfo);
+        UpdateBootDesc(hDlg, ctx);
         return TRUE;
     }
 
@@ -134,7 +147,7 @@ INT_PTR CALLBACK DialogProc(HWND hDlg, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         if ((wmId == IDC_RADIO_BOOT_IMAGE || wmId == IDC_RADIO_BOOT_UEFI ||
              wmId == IDC_RADIO_BOOT_LEGACY || wmId == IDC_RADIO_BOOT_BOTH) &&
             wmEvent == BN_CLICKED) {
-            UpdateBootDesc(hDlg, ctx ? ctx->isoInfo : nullptr);
+            UpdateBootDesc(hDlg, ctx);
             return TRUE;
         }
 

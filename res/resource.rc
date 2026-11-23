@@ -6,8 +6,8 @@
 IDI_PLUGIN_ICON ICON "IsoWriter.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,1,0,0
- PRODUCTVERSION 0,1,0,0
+ FILEVERSION 0,2,0,0
+ PRODUCTVERSION 0,2,0,0
  FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
  FILEFLAGS 0x0L
  FILEOS VOS_NT_WINDOWS32
@@ -19,9 +19,9 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "FileDescription", "ISO USB Writer (Raw Write ISO/IMG to USB drives)"
-            VALUE "FileVersion", "0.1.0.0"
+            VALUE "FileVersion", "0.2.0.0"
             VALUE "ProductName", "IsoWriter"
-            VALUE "ProductVersion", "0.1"
+            VALUE "ProductVersion", "0.2"
             VALUE "LegalCopyright", "Copyright (C) 2026 chuikoff"
         END
     END
@@ -85,9 +85,9 @@ BEGIN
     CONTROL         "Всегда включать проверку после записи", IDC_CHECK_DEFAULT_VERIFY,
                     "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 14, 50, 250, 10
 
-    LTEXT           "Образ пишется побайтно (DD). Режимы UEFI/Legacy настраивают флаги загрузки.", IDC_STATIC, 14, 68, 250, 20
+    LTEXT           "ISO без таблицы разделов распаковывается в раздел. Остальные пишутся побайтно, режимы меняют флаги.", IDC_STATIC, 14, 68, 250, 20
 
-    LTEXT           "Версия 0.1", IDC_STATIC_SETTINGS_VERSION, 14, 99, 100, 10
+    LTEXT           "Версия 0.2", IDC_STATIC_SETTINGS_VERSION, 14, 99, 100, 10
 
     DEFPUSHBUTTON   "Сохранить", IDOK, 154, 96, 54, 15
     PUSHBUTTON      "Отмена", IDCANCEL, 212, 96, 52, 15
